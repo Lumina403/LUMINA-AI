@@ -131,7 +131,7 @@ sudo systemctl start ollama
 CONFIG=release make -j$(nproc)
 
 # Run
-./build/LuminaAI
+./LuminaAI
 ```
 ## Screenshots
 
