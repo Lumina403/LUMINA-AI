@@ -131,6 +131,7 @@ sudo systemctl start ollama
 CONFIG=release make -j$(nproc)
 
 # Run
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)
 ./LuminaAI
 ```
 ## Screenshots
