@@ -122,7 +122,7 @@ http://localhost:11434
 ```bash
 # Clone repository
 git clone https://github.com/Lumina403/Lumina-AI.git
-cd Lumina-AI
+cd LUMINA-AI
 
 # Ensure Ollama is running
 sudo systemctl start ollama
