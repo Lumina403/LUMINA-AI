@@ -19,17 +19,17 @@
 // 
 
 #include <QMenu>
-#include "ShijimaWidget.hpp"
 
-class QCloseEvent;
-class QActionEvent;
+class ShijimaWidget;
 
 class ShijimaContextMenu : public QMenu {
 public:
-    ShijimaWidget *shijimaParent() {
-        return static_cast<ShijimaWidget *>(parent());
-    }
     explicit ShijimaContextMenu(ShijimaWidget *parent);
+    ~ShijimaContextMenu();
+
 protected:
-    void closeEvent(QCloseEvent *) override;
+    void closeEvent(QCloseEvent *event) override;
+
+private:
+    ShijimaWidget *m_parent;
 };

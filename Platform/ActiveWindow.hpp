@@ -28,12 +28,18 @@ public:
     bool available;
     QString uid;
     long pid;
+    QString processName;   // Nama proses (dari /proc/<pid>/comm)
+    QString windowTitle;   // Judul jendela (dari script desktop)
     double x, y, width, height;
+
+    // Konstruktor dengan informasi lengkap
     ActiveWindow(QString const& uid, long pid, double x, double y,
-        double width, double height):
-        available(true), uid(uid), pid(pid), x(x), y(y), width(width),
-        height(height) {}
-    ActiveWindow(): available(false) {}
+        double width, double height, QString const& title = "", QString const& procName = ""):
+        available(true), uid(uid), pid(pid), processName(procName), windowTitle(title),
+        x(x), y(y), width(width), height(height) {}
+
+    // Konstruktor default
+    ActiveWindow(): available(false), processName(""), windowTitle("") {}
 };
 
 }

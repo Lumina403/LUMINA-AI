@@ -28,6 +28,10 @@
 #include "PlatformWidget.hpp"
 #include "MascotData.hpp"
 
+// Forward declarations for AI speech bubble
+class QLabel;
+class QTimer;
+
 class QPushButton;
 class QPaintEvent;
 class QMouseEvent;
@@ -47,6 +51,7 @@ public:
     void tick();
     bool pointInside(QPoint const& point);
     int mascotId() { return m_mascotId; }
+    void setExpression(const QString& expr);
     void showInspector();
     void markForDeletion() { m_markedForDeletion = true; }
     bool inspectorVisible();
@@ -67,10 +72,15 @@ public:
         return m_data->name();
     }
     ~ShijimaWidget();
+
+    // ==================== AI INTEGRATION ====================
+    void speak(const QString& text);  // menampilkan bubble chat
+
 protected:
     void paintEvent(QPaintEvent *) override;
     void mousePressEvent(QMouseEvent *) override;
     void mouseReleaseEvent(QMouseEvent *) override;
+
 private:
     void setDragTarget(ShijimaWidget *target);
     bool isMirroredRender() const;
@@ -78,6 +88,8 @@ private:
     void contextMenuClosed(QCloseEvent *);
     void showContextMenu(QPoint const&);
     bool updateOffsets();
+    void updateBubblePosition();  // untuk mengikuti pergerakan karakter
+
 #ifdef __linux__
     QRegion m_windowMask;
 #endif
@@ -100,4 +112,8 @@ private:
     bool m_paused = false;
     bool m_markedForDeletion = false;
     int m_mascotId;
+
+    // ==================== AI speech bubble members ====================
+    QLabel* m_speechBubble = nullptr;
+    QTimer* m_speechTimer = nullptr;
 };

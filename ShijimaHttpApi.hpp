@@ -20,6 +20,7 @@
 
 #include <string>
 #include <thread>
+#include <httplib.h>
 
 class ShijimaManager;
 
@@ -29,6 +30,7 @@ namespace httplib {
 
 class ShijimaHttpApi {
 private:
+    void handleAIChat(const httplib::Request& req, httplib::Response& res);
     httplib::Server *m_server;
     std::thread *m_thread;
     ShijimaManager *m_manager;

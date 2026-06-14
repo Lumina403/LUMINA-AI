@@ -19,16 +19,34 @@
 #include "ShijimaContextMenu.hpp"
 #include "ShijimaWidget.hpp"
 #include "ShijimaManager.hpp"
+#include <QAction>
+#include <QInputDialog>
+#include <QtConcurrent>
+#include <QMetaObject>
+#include <QPointer>
+#include <QGuiApplication>
 
 ShijimaContextMenu::ShijimaContextMenu(ShijimaWidget *parent)
-    : QMenu("Context menu", parent)
+    : QMenu("Context menu", parent), m_parent(parent)
 {
     QAction *action;
 
-    // Behaviors menu   
+    // === Chat with AI ===
+    QAction *chatAction = this->addAction("Chat with AI...");
+    connect(chatAction, &QAction::triggered, [this]() {
+        bool ok;
+        QString prompt = QInputDialog::getText(this, "Chat with AI", "Pesan untuk AI:", QLineEdit::Normal, "", &ok);
+        if (!ok || prompt.isEmpty()) return;
+        this->close(); // tutup menu sementara
+
+        // Gunakan method terpusat yang bisa menangani /search dan AI
+        ShijimaManager::defaultManager()->processUserCommand(prompt);
+    });
+
+    // === Behaviors menu ===
     {
         std::vector<std::string> behaviors;
-        auto &list = parent->m_mascot->initial_behavior_list();
+        auto &list = m_parent->m_mascot->initial_behavior_list();
         auto flat = list.flatten_unconditional();
         for (auto &behavior : flat) {
             if (!behavior->hidden) {
@@ -39,7 +57,7 @@ ShijimaContextMenu::ShijimaContextMenu(ShijimaWidget *parent)
         for (std::string &behavior : behaviors) {
             action = behaviorsMenu->addAction(QString::fromStdString(behavior));
             connect(action, &QAction::triggered, [this, behavior](){
-                shijimaParent()->m_mascot->next_behavior(behavior);
+                m_parent->m_mascot->next_behavior(behavior);
             });
         }
     }
@@ -53,28 +71,27 @@ ShijimaContextMenu::ShijimaContextMenu(ShijimaWidget *parent)
     // Inspect
     action = addAction("Inspect");
     connect(action, &QAction::triggered, [this](){
-        shijimaParent()->showInspector();
+        m_parent->showInspector();
     });
 
     // Pause checkbox
     action = addAction("Pause");
     action->setCheckable(true);
-    action->setChecked(parent->m_paused);
+    action->setChecked(m_parent->m_paused);
     connect(action, &QAction::triggered, [this](bool checked){
-        shijimaParent()->m_paused = checked;
+        m_parent->m_paused = checked;
     });
 
     // Call another
     action = addAction("Call another");
     connect(action, &QAction::triggered, [this](){
-        ShijimaManager::defaultManager()->spawn(this->shijimaParent()->mascotName()
-            .toStdString());
+        ShijimaManager::defaultManager()->spawn(m_parent->mascotName().toStdString());
     });
 
     // Dismiss all but one
     action = addAction("Dismiss all but one");
     connect(action, &QAction::triggered, [this](){
-        ShijimaManager::defaultManager()->killAllButOne(this->shijimaParent());
+        ShijimaManager::defaultManager()->killAllButOne(m_parent);
     });
 
     // Dismiss all
@@ -85,20 +102,12 @@ ShijimaContextMenu::ShijimaContextMenu(ShijimaWidget *parent)
 
     // Dismiss
     action = addAction("Dismiss");
-    connect(action, &QAction::triggered, parent, &ShijimaWidget::closeAction);
+    connect(action, &QAction::triggered, m_parent, &ShijimaWidget::closeAction);
 }
+
+ShijimaContextMenu::~ShijimaContextMenu() {}
 
 void ShijimaContextMenu::closeEvent(QCloseEvent *event) {
-    shijimaParent()->contextMenuClosed(event);
+    m_parent->contextMenuClosed(event);
     QMenu::closeEvent(event);
 }
-
-/*
-ShijimaContextMenu::~ShijimaContextMenu() {
-    auto allActions = actions();
-    for (QAction *action : allActions) {
-        removeAction(action);
-        delete action;
-    }
-}
-*/

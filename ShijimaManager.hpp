@@ -38,11 +38,14 @@
 #include "ShijimaHttpApi.hpp"
 #include <condition_variable>
 
-class QVBoxLayout;
-class QWidget;
+// Forward declarations for AI chat widgets
+class QLineEdit;
+class QPushButton;
 
 class ShijimaManager : public PlatformWidget<QMainWindow>
 {
+    Q_OBJECT
+
 public:
     static ShijimaManager *defaultManager();
     static void finalize();
@@ -56,13 +59,30 @@ public:
     void killAllButOne(QString const& name);
     void setManagerVisible(bool visible);
     void importOnShow(QString const& path);
+    void makeMascotSpeak(const QString& text);
     QMap<QString, MascotData *> const& loadedMascots();
     QMap<int, MascotData *> const& loadedMascotsById();
     std::list<ShijimaWidget *> const& mascots();
     std::map<int, ShijimaWidget *> const& mascotsById();
     ShijimaWidget *hitTest(QPoint const& screenPos);
+    std::string chatWithAI(const std::string& userMessage,
+                           int depth = 0,
+                           bool toolResultMode = false,
+                           const std::string& toolOutput = {},
+                           const std::string& originalQuestion = {},
+                           bool isWindowComment = false);
     void onTickSync(std::function<void(ShijimaManager *)> callback);
+    void processUserCommand(const QString& msg);
     ~ShijimaManager();
+
+    // New methods for idle AI actions
+    void tickIdleLogic();
+    void triggerIdleAction();
+    void applyAIAction(const std::string& actionName);
+
+private slots:
+    void sendChatMessage();
+
 protected:
     void timerEvent(QTimerEvent *event) override;
     void showEvent(QShowEvent *event) override;
@@ -70,8 +90,10 @@ protected:
     bool eventFilter(QObject *obj, QEvent *event) override;
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dropEvent(QDropEvent *event) override;
+
 private:
     explicit ShijimaManager(QWidget *parent = nullptr);
+    bool tryHandlePostureCommand(const QString& msg);
     static std::string imgRootForTemplatePath(std::string const& path);
     std::unique_lock<std::mutex> acquireLock();
     void loadDefaultMascot();
@@ -97,6 +119,8 @@ private:
     void importWithDialog(QList<QString> const& paths);
     void tick();
     QScreen *mascotScreen();
+
+    // --- Member variables ---
     QColor m_sandboxBackground;
     QAction *m_windowedModeAction;
     QWidget *m_sandboxWidget;
@@ -127,4 +151,19 @@ private:
     std::mutex m_mutex;
     std::condition_variable m_tickCallbackCompletion;
     std::list<std::function<void(ShijimaManager *)>> m_tickCallbacks;
+
+    // AI Chat UI elements
+    QString m_lastAIExpr;    
+    QLineEdit *m_chatInput;
+    QPushButton *m_sendButton;
+    QString m_lastWindowUid;
+    bool m_aiCommentActive = false;
+    bool m_aiRequestActive = false;
+
+    // Idle AI logic
+    int m_idleTicksRemaining = 30;        // countdown until next idle action (approx seconds)
+    bool m_idleBusy = false;              // whether idle action is currently in progress
+    // AI posture lock
+    bool m_postureExprLocked = false;
+    void moveMascotTo(int x, int y);
 };

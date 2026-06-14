@@ -23,7 +23,7 @@ import Shell from 'gi://Shell';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 class ActiveIE {
-    constructor(rect, uid, pid, scale) {
+    constructor(rect, uid, pid, title, scale) {
         if (rect == null) {
             this.visible = false;
         }
@@ -34,6 +34,7 @@ class ActiveIE {
             this.visible = true;
             this.uid = uid;
             this.pid = pid;
+            this.title = title || "";
             this.x = rect.x;
             this.y = rect.y;
             this.width = rect.width;
@@ -48,6 +49,7 @@ class ActiveIE {
         }
         return this.pid === other.pid &&
             this.uid === other.uid &&
+            this.title === other.title &&
             this.visible === other.visible &&
             this.x === other.x &&
             this.y === other.y &&
@@ -56,7 +58,7 @@ class ActiveIE {
     }
 
     toString() {
-        return `[ActiveIE uid:${this.uid} pid:${this.pid} visible:${this.visible} ` +
+        return `[ActiveIE uid:${this.uid} pid:${this.pid} title:"${this.title}" visible:${this.visible} ` +
             `origin:${this.x},${this.y} size:${this.width},${this.height}]`;
     }
 }
@@ -106,23 +108,25 @@ export default class ShijimaExtension extends Extension {
         }
         const rect = focused.get_frame_rect();
         const scale = focused.get_display().get_monitor_scale(focused.get_monitor());
-        return new ActiveIE(rect, focused.get_id(), focused.get_pid(), scale);
+        const title = focused.get_title() || "";
+        return new ActiveIE(rect, focused.get_id(), focused.get_pid(), title, scale);
     }
 
     _sendShijimaMessage() {
         let variant;
         if (this._activeIE != null && this._activeIE.visible) {
-            variant = new GLib.Variant('(sidddd)', [
+            variant = new GLib.Variant('(sidddds)', [
                 this._activeIE.uid.toString(),
                 this._activeIE.pid,
                 this._activeIE.x,
                 this._activeIE.y,
                 this._activeIE.width,
-                this._activeIE.height
+                this._activeIE.height,
+                this._activeIE.title
             ]);
         }
         else {
-            variant = new GLib.Variant('(sidddd)', [ "", -1, -1, -1, -1, -1 ])
+            variant = new GLib.Variant('(sidddds)', [ "", -1, -1, -1, -1, -1, "" ]);
         }
         Gio.DBus.session.call(
             'com.pixelomer.ShijimaQt',

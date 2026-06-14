@@ -33,7 +33,7 @@ private:
     std::unique_ptr<WindowObserverBackend> m_backend;
     QSocketNotifier *m_signalNotifier;
     void updateActiveWindow(QString const& uid, int pid, double x, double y,
-        double width, double height);
+        double width, double height, QString const& title);  // added title parameter
 public:
     static const QString m_dbusServiceName;
     static const QString m_dbusInterfaceName;

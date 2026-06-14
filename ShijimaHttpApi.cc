@@ -346,6 +346,58 @@ ShijimaHttpApi::ShijimaHttpApi(ShijimaManager *manager): m_server(new Server),
             }
         });
     });
+
+    // ==================== AI INTEGRATION ====================
+    // Endpoint untuk chat dengan AI lokal (Ollama)
+    m_server->Post("/shijima/api/v1/ai/chat",
+        [this](Request const& req, Response &res)
+    {
+        std::cout << "[AI] Received POST /ai/chat" << std::endl;
+        auto json = jsonForRequest(req);
+        if (!json.has_value()) {
+            std::cerr << "[AI] Invalid JSON" << std::endl;
+            badRequest(req, res);
+            return;
+        }
+        auto messageValue = json->take("message");
+        if (!messageValue.isString()) {
+            std::cerr << "[AI] Missing message field" << std::endl;
+            badRequest(req, res);
+            return;
+        }
+        std::string userMessage = messageValue.toString().toStdString();
+        std::cout << "[AI] User message: " << userMessage << std::endl;
+
+        std::string aiReply;
+        try {
+            aiReply = m_manager->chatWithAI(userMessage);
+            std::cout << "[AI] AI reply: " << aiReply.substr(0, std::min(50, (int)aiReply.size())) << "..." << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "[AI] Exception in chatWithAI: " << e.what() << std::endl;
+            aiReply = "Terjadi error internal: " + std::string(e.what());
+        } catch (...) {
+            std::cerr << "[AI] Unknown exception" << std::endl;
+            aiReply = "Terjadi error unknown";
+        }
+
+        // 🔽 PERINTAHKAN KARAKTER UNTUK BICARA 🔽
+        m_manager->onTickSync([aiReply](ShijimaManager *manager){
+            auto &mascots = manager->mascots();
+            if (!mascots.empty()) {
+                // Panggil method speak pada karakter pertama
+                mascots.front()->speak(QString::fromStdString(aiReply));
+            } else {
+                std::cout << "[AI] No mascot to speak" << std::endl;
+            }
+        });
+
+        QJsonObject responseObj;
+        responseObj["reply"] = QString::fromStdString(aiReply);
+        sendJson(res, responseObj);
+        std::cout << "[AI] Response sent" << std::endl;
+    });
+    // ========================================================
+
     m_server->Get(".*", badRequest);
     m_server->Put(".*", badRequest);
     m_server->Post(".*", badRequest);

@@ -37,6 +37,18 @@ const QString PrivateActiveWindowObserver::m_dbusInterfaceName = "com.pixelomer.
 const QString PrivateActiveWindowObserver::m_dbusServiceName = "com.pixelomer.ShijimaQt";
 const QString PrivateActiveWindowObserver::m_dbusMethodName = "updateActiveWindow";
 
+// Helper function to read process name from /proc/<pid>/comm
+static QString getProcessName(pid_t pid) {
+    QString path = QString("/proc/%1/comm").arg(pid);
+    QFile file(path);
+    if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QTextStream in(&file);
+        QString name = in.readLine();
+        return name.trimmed();
+    }
+    return QString();
+}
+
 PrivateActiveWindowObserver::PrivateActiveWindowObserver(QObject *obj)
     : QDBusVirtualObject(obj) 
 {
@@ -92,6 +104,7 @@ QString PrivateActiveWindowObserver::introspect(QString const&) const {
         "    <arg name=\"y\" type=\"d\" direction=\"in\"/>"
         "    <arg name=\"width\" type=\"d\" direction=\"in\"/>"
         "    <arg name=\"height\" type=\"d\" direction=\"in\"/>"
+        "    <arg name=\"title\" type=\"s\" direction=\"in\"/>"
         "  </method>"
         "</interface>";
     return interfaceXML;
@@ -123,14 +136,14 @@ bool PrivateActiveWindowObserver::handleMessage(const QDBusMessage &message,
     } \
     while (0)
 
-    if (args.size() != 6) {
-        fail_invalid_args("Expected 6 arguments");
+    // Sekarang menerima 7 argumen: uid, pid, x, y, width, height, title
+    if (args.size() != 7) {
+        fail_invalid_args("Expected 7 arguments");
     }
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-    // type() is used here because it also works with Qt5
     if (args[0].type() != QVariant::String) {
-        fail_invalid_args("Expected args[0] to be an String");
+        fail_invalid_args("Expected args[0] to be a String");
     }
     if (args[1].type() != QVariant::Int) {
         fail_invalid_args("Expected args[1] to be an Int");
@@ -143,13 +156,17 @@ bool PrivateActiveWindowObserver::handleMessage(const QDBusMessage &message,
         fail_invalid_args(QString::fromStdString("Expected args[" + \
             std::to_string(i) + "] to be a Double"));
     }
+    if (args[6].type() != QVariant::String) {
+        fail_invalid_args("Expected args[6] to be a String");
+    }
     QString uid = args[0].toString();
     int pid = args[1].toInt();
     double x = args[2].toDouble();
     double y = args[3].toDouble();
     double width = args[4].toDouble();
     double height = args[5].toDouble();
-    updateActiveWindow(uid, pid, x, y, width, height);
+    QString title = args[6].toString();
+    updateActiveWindow(uid, pid, x, y, width, height, title);
 
     auto reply = message.createReply();
     connection.send(reply);
@@ -157,29 +174,32 @@ bool PrivateActiveWindowObserver::handleMessage(const QDBusMessage &message,
 }
 
 void PrivateActiveWindowObserver::updateActiveWindow(QString const& uid, int pid,
-    double x, double y, double width, double height)
+    double x, double y, double width, double height, QString const& title)
 {
     /* std::cerr << "uid=" << uid.toStdString() << ", "
         << "pid=" << pid << ", "
         << "x=" << x << ", "
         << "y=" << y << ", "
         << "width=" << width << ", "
-        << "height=" << height << ", " << std::endl; */
+        << "height=" << height << ", "
+        << "title=" << title.toStdString() << std::endl; */
     if (getpid() == pid) {
         if (!m_activeWindow.available && m_previousActiveWindow.available) {
             m_activeWindow = m_previousActiveWindow;
         }
         return;
     }
+    // Ambil nama proses dari /proc
+    QString procName = getProcessName(pid);
     if (width < 0 && m_activeWindow.available && !m_previousActiveWindow.available) {
         m_previousActiveWindow = m_activeWindow;
         m_activeWindow = {};
     }
     else {
-        m_activeWindow = { uid, pid, x, y, width, height };
+        // Gunakan konstruktor ActiveWindow yang sudah diperluas
+        m_activeWindow = { uid, pid, x, y, width, height, title, procName };
         m_previousActiveWindow = {};
     }
 }
-
 
 }

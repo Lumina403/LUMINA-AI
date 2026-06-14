@@ -28,6 +28,10 @@
 #include <QDebug>
 #include <QGuiApplication>
 #include <QTextStream>
+#include <QLabel>
+#include <QTimer>
+#include <QMetaObject>
+#include <QPropertyAnimation>      // IMPORTANT: for fade effect
 #include <shijima/shijima.hpp>
 #include "Platform/Platform.hpp"
 #include "ShimejiInspectorDialog.hpp"
@@ -47,7 +51,8 @@ ShijimaWidget::ShijimaWidget(MascotData *mascotData,
     PlatformWidget(parent, PlatformWidget::ShowOnAllDesktops),
 #endif
     m_windowedMode(windowedMode), m_data(mascotData),
-    m_inspector(nullptr), m_mascotId(mascotId)
+    m_inspector(nullptr), m_mascotId(mascotId),
+    m_speechBubble(nullptr), m_speechTimer(nullptr)
 {
     m_windowHeight = 128;
     m_windowWidth = 128;
@@ -216,6 +221,9 @@ bool ShijimaWidget::updateOffsets() {
     }
     move(winX, winY);
 
+    // Update bubble position after moving the character
+    updateBubblePosition();
+
     return needsRepaint;
 }
 
@@ -305,6 +313,14 @@ ShijimaWidget::~ShijimaWidget() {
         delete m_inspector;
     }
     setDragTarget(nullptr);
+    if (m_speechBubble) {
+        m_speechBubble->deleteLater();
+        m_speechBubble = nullptr;
+    }
+    if (m_speechTimer) {
+        m_speechTimer->deleteLater();
+        m_speechTimer = nullptr;
+    }
 }
 
 void ShijimaWidget::setDragTarget(ShijimaWidget *target) {
@@ -369,3 +385,80 @@ void ShijimaWidget::mouseReleaseEvent(QMouseEvent *event) {
         setDragTarget(nullptr);
     }
 }
+
+// ==================== AI SPEECH BUBBLE IMPLEMENTATION ====================
+void ShijimaWidget::updateBubblePosition() {
+    if (m_speechBubble && m_speechBubble->isVisible()) {
+        QPoint pos = mapToGlobal(QPoint(20, -m_speechBubble->height() - 10));
+        m_speechBubble->move(pos);
+    }
+}
+
+void ShijimaWidget::speak(const QString& text) {
+    std::cout << "[ShijimaWidget] speak: " << text.toStdString() << std::endl;
+    
+    // Hapus bubble lama jika ada
+    if (m_speechBubble) {
+        m_speechBubble->deleteLater();
+        m_speechBubble = nullptr;
+    }
+    if (m_speechTimer) {
+        m_speechTimer->stop();
+        m_speechTimer->deleteLater();
+        m_speechTimer = nullptr;
+    }
+
+    // Buat QLabel sebagai jendela terpisah (tooltip) agar tidak terpotong
+    m_speechBubble = new QLabel(text);
+    m_speechBubble->setWindowFlags(Qt::ToolTip | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+    m_speechBubble->setAttribute(Qt::WA_TranslucentBackground);
+    m_speechBubble->setWordWrap(true);
+    m_speechBubble->setMaximumWidth(200);
+    m_speechBubble->setStyleSheet(
+        "QLabel {"
+        "  background-color: white;"
+        "  border: 2px solid black;"
+        "  border-radius: 10px;"
+        "  padding: 8px;"
+        "  font-size: 12px;"
+        "  font-family: sans-serif;"
+        "}"
+    );
+    m_speechBubble->adjustSize();
+
+    // Posisikan di atas karakter
+    updateBubblePosition();
+    m_speechBubble->show();
+
+    // Efek fade in
+    QPropertyAnimation *fadeIn = new QPropertyAnimation(m_speechBubble, "windowOpacity");
+    fadeIn->setDuration(200);
+    fadeIn->setStartValue(0.0);
+    fadeIn->setEndValue(1.0);
+    fadeIn->start(QAbstractAnimation::DeleteWhenStopped);
+
+    // Timer untuk menghilangkan gelembung setelah 4 detik
+    m_speechTimer = new QTimer(this);
+    m_speechTimer->setSingleShot(true);
+    connect(m_speechTimer, &QTimer::timeout, [this]() {
+        if (m_speechBubble) {
+            QPropertyAnimation *fadeOut = new QPropertyAnimation(m_speechBubble, "windowOpacity");
+            fadeOut->setDuration(200);
+            fadeOut->setStartValue(1.0);
+            fadeOut->setEndValue(0.0);
+            connect(fadeOut, &QPropertyAnimation::finished, [this]() {
+                if (m_speechBubble) {
+                    m_speechBubble->deleteLater();
+                    m_speechBubble = nullptr;
+                }
+            });
+            fadeOut->start(QAbstractAnimation::DeleteWhenStopped);
+        }
+        if (m_speechTimer) {
+            m_speechTimer->deleteLater();
+            m_speechTimer = nullptr;
+        }
+    });
+    m_speechTimer->start(4000);
+}
+// ============================================================o
