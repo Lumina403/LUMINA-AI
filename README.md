@@ -120,17 +120,24 @@ http://localhost:11434
 ## Installation
 
 ```bash
-# Clone repository
-git clone https://github.com/Lumina403/Lumina-AI.git
+# 1. Clone repository utama + download semua nested submodule secara paralel sekaligus
+git clone --recursive -j$(nproc) https://github.com/Lumina403/LUMINA-AI.git
 cd LUMINA-AI
 
-# Ensure Ollama is running
+# 2. Pastikan internal submodule tracking lu sinkron sama GitHub fork lu
+git submodule sync --recursive
+git submodule update --init --recursive --force
+
+# 3. Trik Koboi: Generate paksa Qt6 Meta-Object (MOC) manual biar Makefile kagak balapan thread
+/usr/lib/qt6/libexec/moc ShijimaManager.hpp -o ShijimaManager.moc
+
+# 4. Pastikan backend AI (Ollama) lu udah nyala di latar belakang
 sudo systemctl start ollama
 
-# Build
+# 5. Bantai kompilasi pake full power semua core CPU lu!
 CONFIG=release make -j$(nproc)
 
-# Run
+# 6. Set environment path jeroan library, terus RUNNING JAHANAM!
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)
 ./shijima-qt
 ```
