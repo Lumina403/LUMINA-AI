@@ -68,3 +68,5 @@ DefaultMascot.cc
 !/.images/
 !/.images/*.jpg
 !/.images/*.png
+!/docs/
+!/docs/**
