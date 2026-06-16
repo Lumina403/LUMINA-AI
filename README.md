@@ -116,10 +116,13 @@ http://localhost:11434
 - C++ Compiler with C++17 support
 - Ollama
 - qwen2.5:3b model
+- xdotool
 
 ## Installation
 
 ```bash
+# 0. Install xdotool
+sudo apt install xdotool
 # 1. Clone repository utama + download semua nested submodule secara paralel sekaligus
 git clone --recursive -j$(nproc) https://github.com/Lumina403/LUMINA-AI.git
 cd LUMINA-AI
