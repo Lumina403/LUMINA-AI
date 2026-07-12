@@ -21,12 +21,14 @@
 #include <QWidget>
 #include <memory>
 #include <QRegion>
+#include <QMap>
 #include "Asset.hpp"
 #include "SoundEffectManager.hpp"
 #include <shijima/mascot/manager.hpp>
 #include <shijima/mascot/environment.hpp>
 #include "PlatformWidget.hpp"
 #include "MascotData.hpp"
+#include <QMutex>
 
 // Forward declarations for AI speech bubble
 class QLabel;
@@ -36,6 +38,7 @@ class QPushButton;
 class QPaintEvent;
 class QMouseEvent;
 class QCloseEvent;
+class QShowEvent;
 class ShijimaContextMenu;
 class ShimejiInspectorDialog;
 
@@ -51,11 +54,28 @@ public:
     void tick();
     bool pointInside(QPoint const& point);
     int mascotId() { return m_mascotId; }
-    void setExpression(const QString& expr);
+    inline void setExpression(const QString& expr) {
+        static const QMap<QString, QString> exprToBehavior = {
+            {"sukses",    "StandUp"},
+            {"error",     "LieDown"},
+            {"mikir",     "SitAndSpinHead"},
+            {"kaget",     "SitAndFaceMouse"},
+            {"normal",    "SitWhileDanglingLegs"},
+            {"happy",     "StandUp"},
+            {"sad",       "LieDown"},
+            {"thinking",  "SitAndSpinHead"},
+            {"surprised", "SitAndFaceMouse"}
+        };
+        QString behaviorName = exprToBehavior.value(expr, "SitWhileDanglingLegs");
+        forceBehavior(behaviorName);
+    }
     void showInspector();
     void markForDeletion() { m_markedForDeletion = true; }
     bool inspectorVisible();
     bool paused() const { return m_paused || m_contextMenuVisible; }
+    bool isAIFullControl() const { return m_aiFullControl; }
+    void setAIBehavior(const QString& behaviorName);
+    void enableAIFullControl(bool enable);
     shijima::mascot::manager &mascot() {
         return *m_mascot;
     }
@@ -75,11 +95,13 @@ public:
 
     // ==================== AI INTEGRATION ====================
     void speak(const QString& text);  // menampilkan bubble chat
+    void forceBehavior(const QString& behavior);
 
 protected:
     void paintEvent(QPaintEvent *) override;
     void mousePressEvent(QMouseEvent *) override;
     void mouseReleaseEvent(QMouseEvent *) override;
+    void showEvent(QShowEvent *) override;
 
 private:
     void setDragTarget(ShijimaWidget *target);
@@ -89,6 +111,7 @@ private:
     void showContextMenu(QPoint const&);
     bool updateOffsets();
     void updateBubblePosition();  // untuk mengikuti pergerakan karakter
+    QMutex m_behaviorMutex;
 
 #ifdef __linux__
     QRegion m_windowMask;
@@ -112,6 +135,9 @@ private:
     bool m_paused = false;
     bool m_markedForDeletion = false;
     int m_mascotId;
+    bool m_aiFullControl = true;  // default true, AI pegang kendali
+    bool m_aiBehaviorPending = false;
+    QString m_aiForcedBehavior;
 
     // ==================== AI speech bubble members ====================
     QLabel* m_speechBubble = nullptr;

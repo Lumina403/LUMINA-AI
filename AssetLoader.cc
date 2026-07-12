@@ -42,6 +42,7 @@ void AssetLoader::finalize() {
 
 Asset const& AssetLoader::loadAsset(QString path) {
     path = QDir::cleanPath(path);
+    QImage img(path);
     if (!m_assets.contains(path)) {
         Asset &asset = m_assets[path];
         QImage image;

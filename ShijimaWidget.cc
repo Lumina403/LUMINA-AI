@@ -31,7 +31,9 @@
 #include <QLabel>
 #include <QTimer>
 #include <QMetaObject>
-#include <QPropertyAnimation>      // IMPORTANT: for fade effect
+#include <QPropertyAnimation>
+#include <QMutex>
+#include <QMutexLocker>
 #include <shijima/shijima.hpp>
 #include "Platform/Platform.hpp"
 #include "ShimejiInspectorDialog.hpp"
@@ -52,6 +54,7 @@ ShijimaWidget::ShijimaWidget(MascotData *mascotData,
 #endif
     m_windowedMode(windowedMode), m_data(mascotData),
     m_inspector(nullptr), m_mascotId(mascotId),
+    m_aiFullControl(true), m_aiBehaviorPending(false),
     m_speechBubble(nullptr), m_speechTimer(nullptr)
 {
     m_windowHeight = 128;
@@ -85,7 +88,12 @@ ShijimaWidget::ShijimaWidget(MascotData *mascotData,
 ShijimaWidget::ShijimaWidget(ShijimaWidget &old, bool windowedMode,
     QWidget *parent) : ShijimaWidget(old.mascotData(),
     std::move(old.m_mascot), old.m_mascotId,
-    windowedMode, parent) {}
+    windowedMode, parent)
+{
+    m_aiFullControl = old.m_aiFullControl;
+    m_aiForcedBehavior = old.m_aiForcedBehavior;
+    m_aiBehaviorPending = old.m_aiBehaviorPending;
+}
 
 void ShijimaWidget::showInspector() {
     if (m_inspector == nullptr) {
@@ -101,6 +109,11 @@ bool ShijimaWidget::inspectorVisible() {
 Asset const& ShijimaWidget::getActiveAsset() {
     auto &name = m_mascot->state->active_frame.get_name(m_mascot->state->looking_right);
     auto lowerName = shimejifinder::to_lower(name);
+    // FIX: tambahkan ekstensi .png jika belum ada
+    QString lowerQ = QString::fromStdString(lowerName);
+    if (!lowerQ.endsWith(".png") && !lowerQ.endsWith(".PNG")) {
+        lowerName += ".png";
+    }
     auto imagePath = QDir::cleanPath(m_data->imgRoot()
         + QDir::separator() + QString::fromStdString(lowerName));
     return AssetLoader::defaultLoader()->loadAsset(imagePath);
@@ -138,20 +151,20 @@ void ShijimaWidget::paintEvent(QPaintEvent *event) {
 #endif
 }
 
+void ShijimaWidget::showEvent(QShowEvent *event) {
+    PlatformWidget::showEvent(event);
+}
+
 bool ShijimaWidget::updateOffsets() {
     bool needsRepaint = false;
     auto &frame = m_mascot->state->active_frame;
     auto &asset = getActiveAsset();
     
-    // Does the image go outside of the minimum boundary? If so,
-    // extend the window boundary
     int originalWidth = asset.originalSize().width();
     int originalHeight = asset.originalSize().height();
     double scale = m_mascot->state->env->get_scale();
-    int screenWidth = (int)(m_mascot->state->env->screen.width()
-        / scale);
-    int screenHeight = (int)(m_mascot->state->env->screen.height()
-        / scale);
+    int screenWidth = (int)(m_mascot->state->env->screen.width() / scale);
+    int screenHeight = (int)(m_mascot->state->env->screen.height() / scale);
     int windowWidth = (int)(originalWidth / scale);
     int windowHeight = (int)(originalHeight / scale);
 
@@ -166,7 +179,6 @@ bool ShijimaWidget::updateOffsets() {
         needsRepaint = true;
     }
 
-    // Determine the frame anchor within the window
     if (isMirroredRender()) {
         m_anchorInWindow = {
             (int)((originalWidth - frame.anchor.x) / scale),
@@ -177,7 +189,6 @@ bool ShijimaWidget::updateOffsets() {
             (int)(frame.anchor.y / scale) };
     }
 
-    // Detemine draw offsets and window positions
     QPoint drawOffset;
     m_visible = true;
     int winX = (int)m_mascot->state->anchor.x - m_anchorInWindow.x()
@@ -221,7 +232,6 @@ bool ShijimaWidget::updateOffsets() {
     }
     move(winX, winY);
 
-    // Update bubble position after moving the character
     updateBubblePosition();
 
     return needsRepaint;
@@ -241,7 +251,6 @@ bool ShijimaWidget::pointInside(QPoint const& point) {
     {
         return false;
     }
-    //FIXME: is this position correct?
     auto color = image.pixelColor(imagePos * m_drawScale);
     if (color.alpha() == 0) {
         return false;
@@ -249,6 +258,7 @@ bool ShijimaWidget::pointInside(QPoint const& point) {
     return true;
 }
 
+// ==================== AI FULL CONTROL TICK ====================
 void ShijimaWidget::tick() {
     if (m_markedForDeletion) {
         close();
@@ -258,9 +268,32 @@ void ShijimaWidget::tick() {
         return;
     }
 
-    // Tick
+    // === AI FULL CONTROL MODE PRE-TICK ===
+    if (m_aiFullControl && !m_aiForcedBehavior.isEmpty()) {
+        QMutexLocker locker(&m_behaviorMutex);
+        auto active = m_mascot->active_behavior();
+        if (active == nullptr || active->name != m_aiForcedBehavior.toStdString()) {
+            m_mascot->state->next_subtick = 0;
+            m_mascot->next_behavior(m_aiForcedBehavior.toStdString());
+        }
+    }
+
+    // === EXECUTE TICK ===
     auto prev_frame = m_mascot->state->active_frame;
     m_mascot->tick();
+
+    // === AI FULL CONTROL MODE POST-TICK LOOPING ===
+    if (m_aiFullControl && !m_aiForcedBehavior.isEmpty()) {
+        QMutexLocker locker(&m_behaviorMutex);
+        auto active = m_mascot->active_behavior();
+        if (active == nullptr || active->name != m_aiForcedBehavior.toStdString()) {
+            m_mascot->state->next_subtick = 0;
+            m_mascot->next_behavior(m_aiForcedBehavior.toStdString());
+            m_mascot->tick();
+        }
+    }
+
+    // === NORMAL UPDATE / REPAINT / SOUND ===
     auto &new_frame = m_mascot->state->active_frame;
     auto &new_sound = m_mascot->state->active_sound;
     bool forceRepaint = prev_frame.name != new_frame.name;
@@ -286,7 +319,6 @@ void ShijimaWidget::tick() {
         m_mascot->state->active_sound.clear();
     }
 
-    // Update inspector
     if (m_inspector != nullptr && m_inspector->isVisible()) {
         m_inspector->tick();
     }
@@ -386,7 +418,53 @@ void ShijimaWidget::mouseReleaseEvent(QMouseEvent *event) {
     }
 }
 
-// ==================== AI SPEECH BUBBLE IMPLEMENTATION ====================
+// ==================== AI BEHAVIOR CONTROL ====================
+
+void ShijimaWidget::forceBehavior(const QString& behavior) {
+    if (behavior.trimmed().isEmpty()) return;
+    
+    QMutexLocker locker(&m_behaviorMutex);
+    std::cout << "[ShijimaWidget] forceBehavior: " 
+              << behavior.toStdString() << std::endl;
+    
+    m_aiForcedBehavior = behavior;
+    m_aiBehaviorPending = true;
+    
+    // Eksekusi langsung kalau di main thread
+    try {
+        m_mascot->next_behavior(behavior.toStdString());
+        m_aiBehaviorPending = false;
+    } catch (const std::exception& e) {
+        std::cerr << "[ShijimaWidget] Failed to force behavior: " 
+                  << e.what() << std::endl;
+    }
+}
+
+void ShijimaWidget::setAIBehavior(const QString& behaviorName) {
+    if (!m_aiFullControl) return;
+    
+    QMutexLocker locker(&m_behaviorMutex);
+    m_aiForcedBehavior = behaviorName;
+    m_aiBehaviorPending = true;
+}
+
+void ShijimaWidget::enableAIFullControl(bool enable) {
+    QMutexLocker locker(&m_behaviorMutex);
+    m_aiFullControl = enable;
+    
+    if (!enable) {
+        m_aiBehaviorPending = false;
+        m_aiForcedBehavior.clear();
+        
+        // FIX: Reset ke behavior default saat disable AI control
+        try {
+            m_mascot->next_behavior("SitWhileDanglingLegs");
+        } catch (...) {}
+    }
+}
+
+// ==================== SPEECH BUBBLE ====================
+
 void ShijimaWidget::updateBubblePosition() {
     if (m_speechBubble && m_speechBubble->isVisible()) {
         QPoint pos = mapToGlobal(QPoint(20, -m_speechBubble->height() - 10));
@@ -397,7 +475,6 @@ void ShijimaWidget::updateBubblePosition() {
 void ShijimaWidget::speak(const QString& text) {
     std::cout << "[ShijimaWidget] speak: " << text.toStdString() << std::endl;
     
-    // Hapus bubble lama jika ada
     if (m_speechBubble) {
         m_speechBubble->deleteLater();
         m_speechBubble = nullptr;
@@ -408,7 +485,6 @@ void ShijimaWidget::speak(const QString& text) {
         m_speechTimer = nullptr;
     }
 
-    // Buat QLabel sebagai jendela terpisah (tooltip) agar tidak terpotong
     m_speechBubble = new QLabel(text);
     m_speechBubble->setWindowFlags(Qt::ToolTip | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
     m_speechBubble->setAttribute(Qt::WA_TranslucentBackground);
@@ -426,18 +502,15 @@ void ShijimaWidget::speak(const QString& text) {
     );
     m_speechBubble->adjustSize();
 
-    // Posisikan di atas karakter
     updateBubblePosition();
     m_speechBubble->show();
 
-    // Efek fade in
     QPropertyAnimation *fadeIn = new QPropertyAnimation(m_speechBubble, "windowOpacity");
     fadeIn->setDuration(200);
     fadeIn->setStartValue(0.0);
     fadeIn->setEndValue(1.0);
     fadeIn->start(QAbstractAnimation::DeleteWhenStopped);
 
-    // Timer untuk menghilangkan gelembung setelah 4 detik
     m_speechTimer = new QTimer(this);
     m_speechTimer->setSingleShot(true);
     connect(m_speechTimer, &QTimer::timeout, [this]() {
@@ -461,4 +534,3 @@ void ShijimaWidget::speak(const QString& text) {
     });
     m_speechTimer->start(4000);
 }
-// ============================================================o

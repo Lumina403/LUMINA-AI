@@ -148,7 +148,6 @@ bool PrivateActiveWindowObserver::handleMessage(const QDBusMessage &message,
     if (args[1].type() != QVariant::Int) {
         fail_invalid_args("Expected args[1] to be an Int");
     }
-#pragma GCC diagnostic pop
     for (int i=2; i<=5; ++i) {
         if (args[i].canConvert<double>()) {
             continue;
@@ -159,6 +158,7 @@ bool PrivateActiveWindowObserver::handleMessage(const QDBusMessage &message,
     if (args[6].type() != QVariant::String) {
         fail_invalid_args("Expected args[6] to be a String");
     }
+#pragma GCC diagnostic pop
     QString uid = args[0].toString();
     int pid = args[1].toInt();
     double x = args[2].toDouble();
