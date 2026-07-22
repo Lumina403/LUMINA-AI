@@ -43,6 +43,22 @@ ShijimaContextMenu::ShijimaContextMenu(ShijimaWidget *parent)
         ShijimaManager::defaultManager()->processUserCommand(prompt);
     });
 
+    // === Voice Input (STT) ===
+    bool isRec = ShijimaManager::defaultManager()->isRecording();
+    QAction *voiceAction = this->addAction(isRec ? "🛑 Stop Recording (STT)" : "🎤 Voice Input (STT)...");
+    connect(voiceAction, &QAction::triggered, [this]() {
+        this->close();
+        ShijimaManager::defaultManager()->toggleRecording();
+    });
+
+    // === Voice Output (TTS) ===
+    QAction *ttsAction = this->addAction("🔊 Enable Speech (TTS)");
+    ttsAction->setCheckable(true);
+    ttsAction->setChecked(ShijimaManager::defaultManager()->isTtsEnabled());
+    connect(ttsAction, &QAction::triggered, [this](bool checked) {
+        ShijimaManager::defaultManager()->setTtsEnabled(checked);
+    });
+
     // === Behaviors menu ===
     {
         std::vector<std::string> behaviors;

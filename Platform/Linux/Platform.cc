@@ -16,6 +16,8 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // 
 
+#include <QFile>
+#include <QDir>
 #include <QtGlobal>
 #if QT_VERSION < 0x060000
 #   define QT5_MANUALLY_DETERMINE_SCALE
@@ -56,6 +58,29 @@ void determineScale(int argc, char **argv) {
         char *shijimaScaleSet = getenv("SHIJIMA_SCALE_SET");
         if (shijimaScaleSet != NULL && strcmp(shijimaScaleSet, "1") == 0) {
             return;
+        }
+    }
+
+    // Check if Wayland display socket is valid and accessible.
+    // If not, clear WAYLAND_DISPLAY to avoid warning/crash during QApplication init.
+    const char *waylandDisplay = getenv("WAYLAND_DISPLAY");
+    if (waylandDisplay && *waylandDisplay) {
+        QString socketPath;
+        if (waylandDisplay[0] == '/') {
+            socketPath = waylandDisplay;
+        } else {
+            const char *xdgRuntimeDir = getenv("XDG_RUNTIME_DIR");
+            if (xdgRuntimeDir && *xdgRuntimeDir) {
+                socketPath = QString(xdgRuntimeDir) + "/" + waylandDisplay;
+            }
+        }
+        if (!socketPath.isEmpty()) {
+            QFile file(socketPath);
+            if (!file.exists() || !file.open(QIODevice::ReadWrite)) {
+                setenv("WAYLAND_DISPLAY", "", 1);
+            } else {
+                file.close();
+            }
         }
     }
 

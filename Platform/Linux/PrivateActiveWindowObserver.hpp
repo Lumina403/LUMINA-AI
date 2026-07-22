@@ -44,6 +44,7 @@ public:
         const QDBusConnection &connection) override;
     bool alive() { return (m_backend == nullptr) || m_backend->alive(); }
     ActiveWindow getActiveWindow() { return m_activeWindow; }
+    void tick();
 };
 
 }

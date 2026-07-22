@@ -29,6 +29,9 @@ QRect Asset::getRectForImage(QImage const& image) {
         if (y != endY) break;
     }
     startX = x;
+    if (startX == endX) {
+        return { 0, 0, 0, 0 };
+    }
 
     for (y=0; y<endY; ++y) {
         for (x=startX; x<endX; ++x) {

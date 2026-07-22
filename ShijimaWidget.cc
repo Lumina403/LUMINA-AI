@@ -135,14 +135,19 @@ void ShijimaWidget::paintEvent(QPaintEvent *event) {
     painter.drawImage(QRect { m_drawOrigin, scaledSize }, image);
 #ifdef __linux__
     if (Platform::useWindowMasks()) {
-        m_windowMask = QBitmap::fromPixmap(asset.mask(isMirroredRender())
-            .scaled(scaledSize));
-        m_windowMask.translate(m_drawOrigin);
-        auto bounding = m_windowMask.boundingRect();
-        bounding.setTop(0);
-        bounding.setLeft(0);
-        if (bounding.width() > 0 && bounding.height() > 0) {
-            setMask(m_windowMask);
+        auto maskPixmap = asset.mask(isMirroredRender());
+        if (!maskPixmap.isNull()) {
+            m_windowMask = QBitmap::fromPixmap(maskPixmap.scaled(scaledSize));
+            m_windowMask.translate(m_drawOrigin);
+            auto bounding = m_windowMask.boundingRect();
+            bounding.setTop(0);
+            bounding.setLeft(0);
+            if (bounding.width() > 0 && bounding.height() > 0) {
+                setMask(m_windowMask);
+            }
+            else {
+                setMask(QRect { m_windowWidth - 2, m_windowHeight - 2, 1, 1 });
+            }
         }
         else {
             setMask(QRect { m_windowWidth - 2, m_windowHeight - 2, 1, 1 });
@@ -275,6 +280,10 @@ void ShijimaWidget::tick() {
         if (active == nullptr || active->name != m_aiForcedBehavior.toStdString()) {
             m_mascot->state->next_subtick = 0;
             m_mascot->next_behavior(m_aiForcedBehavior.toStdString());
+            m_aiBehaviorPending = false;
+        }
+        else {
+            m_aiBehaviorPending = false;
         }
     }
 
@@ -282,14 +291,17 @@ void ShijimaWidget::tick() {
     auto prev_frame = m_mascot->state->active_frame;
     m_mascot->tick();
 
-    // === AI FULL CONTROL MODE POST-TICK LOOPING ===
+    // === AI FULL CONTROL MODE POST-TICK STATE CHECK ===
     if (m_aiFullControl && !m_aiForcedBehavior.isEmpty()) {
         QMutexLocker locker(&m_behaviorMutex);
         auto active = m_mascot->active_behavior();
         if (active == nullptr || active->name != m_aiForcedBehavior.toStdString()) {
             m_mascot->state->next_subtick = 0;
             m_mascot->next_behavior(m_aiForcedBehavior.toStdString());
-            m_mascot->tick();
+            m_aiBehaviorPending = false;
+        }
+        else {
+            m_aiBehaviorPending = false;
         }
     }
 
@@ -421,21 +433,33 @@ void ShijimaWidget::mouseReleaseEvent(QMouseEvent *event) {
 // ==================== AI BEHAVIOR CONTROL ====================
 
 void ShijimaWidget::forceBehavior(const QString& behavior) {
-    if (behavior.trimmed().isEmpty()) return;
-    
+    QString trimmed = behavior.trimmed();
+    if (trimmed.isEmpty()) return;
+
     QMutexLocker locker(&m_behaviorMutex);
-    std::cout << "[ShijimaWidget] forceBehavior: " 
-              << behavior.toStdString() << std::endl;
-    
-    m_aiForcedBehavior = behavior;
+    std::cout << "[ShijimaWidget] forceBehavior: "
+              << trimmed.toStdString() << std::endl;
+
+    if (m_aiForcedBehavior == trimmed && !m_aiBehaviorPending) {
+        auto active = m_mascot->active_behavior();
+        if (active != nullptr && active->name == trimmed.toStdString()) {
+            return;
+        }
+    }
+
+    m_aiForcedBehavior = trimmed;
     m_aiBehaviorPending = true;
-    
-    // Eksekusi langsung kalau di main thread
+
     try {
-        m_mascot->next_behavior(behavior.toStdString());
+        auto active = m_mascot->active_behavior();
+        if (active == nullptr || active->name != trimmed.toStdString()) {
+            m_mascot->state->next_subtick = 0;
+            m_mascot->next_behavior(trimmed.toStdString());
+        }
         m_aiBehaviorPending = false;
     } catch (const std::exception& e) {
-        std::cerr << "[ShijimaWidget] Failed to force behavior: " 
+        m_aiBehaviorPending = false;
+        std::cerr << "[ShijimaWidget] Failed to force behavior: "
                   << e.what() << std::endl;
     }
 }
@@ -475,41 +499,43 @@ void ShijimaWidget::updateBubblePosition() {
 void ShijimaWidget::speak(const QString& text) {
     std::cout << "[ShijimaWidget] speak: " << text.toStdString() << std::endl;
     
-    if (m_speechBubble) {
-        m_speechBubble->deleteLater();
-        m_speechBubble = nullptr;
-    }
     if (m_speechTimer) {
         m_speechTimer->stop();
         m_speechTimer->deleteLater();
         m_speechTimer = nullptr;
     }
 
-    m_speechBubble = new QLabel(text);
-    m_speechBubble->setWindowFlags(Qt::ToolTip | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
-    m_speechBubble->setAttribute(Qt::WA_TranslucentBackground);
-    m_speechBubble->setWordWrap(true);
-    m_speechBubble->setMaximumWidth(200);
-    m_speechBubble->setStyleSheet(
-        "QLabel {"
-        "  background-color: white;"
-        "  border: 2px solid black;"
-        "  border-radius: 10px;"
-        "  padding: 8px;"
-        "  font-size: 12px;"
-        "  font-family: sans-serif;"
-        "}"
-    );
-    m_speechBubble->adjustSize();
+    if (m_speechBubble) {
+        m_speechBubble->setText(text);
+        m_speechBubble->adjustSize();
+        updateBubblePosition();
+    } else {
+        m_speechBubble = new QLabel(text);
+        m_speechBubble->setWindowFlags(Qt::ToolTip | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+        m_speechBubble->setAttribute(Qt::WA_TranslucentBackground);
+        m_speechBubble->setWordWrap(true);
+        m_speechBubble->setMaximumWidth(200);
+        m_speechBubble->setStyleSheet(
+            "QLabel {"
+            "  background-color: white;"
+            "  border: 2px solid black;"
+            "  border-radius: 10px;"
+            "  padding: 8px;"
+            "  font-size: 12px;"
+            "  font-family: sans-serif;"
+            "}"
+        );
+        m_speechBubble->adjustSize();
 
-    updateBubblePosition();
-    m_speechBubble->show();
+        updateBubblePosition();
+        m_speechBubble->show();
 
-    QPropertyAnimation *fadeIn = new QPropertyAnimation(m_speechBubble, "windowOpacity");
-    fadeIn->setDuration(200);
-    fadeIn->setStartValue(0.0);
-    fadeIn->setEndValue(1.0);
-    fadeIn->start(QAbstractAnimation::DeleteWhenStopped);
+        QPropertyAnimation *fadeIn = new QPropertyAnimation(m_speechBubble, "windowOpacity");
+        fadeIn->setDuration(200);
+        fadeIn->setStartValue(0.0);
+        fadeIn->setEndValue(1.0);
+        fadeIn->start(QAbstractAnimation::DeleteWhenStopped);
+    }
 
     m_speechTimer = new QTimer(this);
     m_speechTimer->setSingleShot(true);
@@ -532,5 +558,7 @@ void ShijimaWidget::speak(const QString& text) {
             m_speechTimer = nullptr;
         }
     });
-    m_speechTimer->start(4000);
+    // Set duration based on text length, minimum 4 seconds.
+    int duration = qMax(4000, (int)text.length() * 100);
+    m_speechTimer->start(duration);
 }

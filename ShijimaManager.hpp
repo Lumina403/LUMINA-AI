@@ -40,6 +40,14 @@
 #include <condition_variable>
 #include <QDateTime>
 #include <QMutex>
+#include <QProcess>
+#if SHIJIMA_USE_QTMULTIMEDIA
+#include <QAudioSource>
+#include <QAudioFormat>
+#include <QAudioDevice>
+#include <QMediaDevices>
+#include <QTimer>
+#endif
 
 // Forward declarations
 class QLineEdit;
@@ -121,6 +129,13 @@ public:
     void tickIdleLogic();
     void triggerIdleAction();
     
+    // Voice
+    void speakText(const QString& text);
+    void toggleRecording();
+    bool isTtsEnabled() const { return m_ttsEnabled; }
+    void setTtsEnabled(bool enabled);
+    bool isRecording() const { return m_isRecording; }
+    
     // Tick callback
     void onTickSync(std::function<void(ShijimaManager *)> callback);
     
@@ -184,6 +199,17 @@ private:
     void tick();
 
     // --- Member variables ---
+    
+    // Voice recording
+    QPushButton *m_micButton = nullptr;
+    bool m_isRecording = false;
+    bool m_isProcessingVoice = false;
+    bool m_ttsEnabled = true;
+    QByteArray m_audioBuffer;
+    QAudioFormat m_audioFormat;
+    QAudioSource *m_audioSource = nullptr;
+    QIODevice *m_audioIODevice = nullptr;
+    QTimer *m_rmsTimer = nullptr;
     
     // Sandbox and window management
     QColor m_sandboxBackground;

@@ -34,6 +34,7 @@ void ActiveWindowObserver::tick() {
     if (!m_private->alive()) {
         throw std::runtime_error("Active window observer died");
     }
+    m_private->tick();
 }
 
 ActiveWindow ActiveWindowObserver::getActiveWindow() {

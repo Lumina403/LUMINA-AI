@@ -30,6 +30,8 @@
 #include <QFile>
 #include <iostream>
 #include <unistd.h>
+#include <X11/Xlib.h>
+#include <X11/Xatom.h>
 
 namespace Platform {
 
@@ -200,6 +202,93 @@ void PrivateActiveWindowObserver::updateActiveWindow(QString const& uid, int pid
         m_activeWindow = { uid, pid, x, y, width, height, title, procName };
         m_previousActiveWindow = {};
     }
+}
+
+void PrivateActiveWindowObserver::tick() {
+    if (m_backend != nullptr) {
+        return; // Handled by DBus events from GNOME/KDE extension
+    }
+
+    // Fallback active window polling for other X11 desktop environments (XFCE, Cinnamon, MATE, i3, etc.)
+    auto *x11App = qApp->nativeInterface<QNativeInterface::QX11Application>();
+    if (!x11App) {
+        return;
+    }
+
+    Display *displayID = x11App->display();
+    if (!displayID) {
+        return;
+    }
+
+    Atom activeWindowAtom = XInternAtom(displayID, "_NET_ACTIVE_WINDOW", False);
+    Atom actualType;
+    int actualFormat;
+    unsigned long numItems, bytesAfter;
+    unsigned char *propData = nullptr;
+    Window activeWin = None;
+
+    if (XGetWindowProperty(displayID, DefaultRootWindow(displayID),
+                           activeWindowAtom, 0, 1, False, XA_WINDOW,
+                           &actualType, &actualFormat, &numItems, &bytesAfter,
+                           &propData) == Success && propData != nullptr) {
+        if (numItems > 0) {
+            activeWin = *reinterpret_cast<Window*>(propData);
+        }
+        XFree(propData);
+    }
+
+    if (activeWin == None) {
+        updateActiveWindow("", 0, 0, 0, -1, -1, "");
+        return;
+    }
+
+    // Get geometry
+    Window root;
+    int x_ret = 0, y_ret = 0;
+    unsigned int width_ret = 0, height_ret = 0, border_width_ret = 0, depth_ret = 0;
+    if (!XGetGeometry(displayID, activeWin, &root, &x_ret, &y_ret,
+                      &width_ret, &height_ret, &border_width_ret, &depth_ret)) {
+        updateActiveWindow("", 0, 0, 0, -1, -1, "");
+        return;
+    }
+
+    // Translate coordinates to root window
+    Window child;
+    XTranslateCoordinates(displayID, activeWin, root, 0, 0, &x_ret, &y_ret, &child);
+
+    // Get Title
+    Atom wmNameAtom = XInternAtom(displayID, "_NET_WM_NAME", False);
+    Atom utf8StringAtom = XInternAtom(displayID, "UTF8_STRING", False);
+    unsigned char *titleData = nullptr;
+    QString title;
+    if (XGetWindowProperty(displayID, activeWin, wmNameAtom, 0, 1024, False,
+                           utf8StringAtom, &actualType, &actualFormat, &numItems,
+                           &bytesAfter, &titleData) == Success && titleData != nullptr) {
+        title = QString::fromUtf8(reinterpret_cast<char*>(titleData));
+        XFree(titleData);
+    } else {
+        char *winName = nullptr;
+        if (XFetchName(displayID, activeWin, &winName)) {
+            title = QString::fromLocal8Bit(winName);
+            XFree(winName);
+        }
+    }
+
+    // Get PID
+    Atom pidAtom = XInternAtom(displayID, "_NET_WM_PID", False);
+    unsigned char *pidData = nullptr;
+    int pid = 0;
+    if (XGetWindowProperty(displayID, activeWin, pidAtom, 0, 1, False,
+                           XA_CARDINAL, &actualType, &actualFormat, &numItems,
+                           &bytesAfter, &pidData) == Success && pidData != nullptr) {
+        if (numItems > 0) {
+            pid = *reinterpret_cast<int*>(pidData);
+        }
+        XFree(pidData);
+    }
+
+    QString uid = QString("x11_%1").arg(activeWin);
+    updateActiveWindow(uid, pid, x_ret, y_ret, width_ret, height_ret, title);
 }
 
 }
