@@ -1,1 +1,44 @@
-Nothing should be ignored based on the provided file changes. The modified files (ShijimaManager.cc and update.md) are source code and documentation files that should be tracked in version control.
+```
+# Compiled and build artifacts
+*.o
+*.d
+*.a
+*.obj
+*.out
+*.pyc
+*.class
+*.so
+*.dll
+*.exe
+
+# Dependencies
+node_modules/
+venv/
+.venv/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+target/
+.gradle/
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Editors
+.vscode/
+.idea/
+
+# Build directories
+build/
+dist/
+coverage/
+htmlcov/
+```
