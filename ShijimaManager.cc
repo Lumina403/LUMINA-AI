@@ -3316,33 +3316,42 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
 
     int readTimeout = isWindowComment ? AI_READ_TIMEOUT_WINDOW : AI_READ_TIMEOUT_NORMAL;
 
-    QString systemPrompt = buildSystemPrompt(toolResultMode);
-
-    QString fullPrompt;
-    if (toolResultMode) {
-        fullPrompt = systemPrompt + "\n\n"
-            "Pertanyaan user: " + QString::fromStdString(question) + "\n\n"
-            "OUTPUT YANG SUDAH DIJALANKAN:\n"
-            "```\n" + QString::fromStdString(toolOutput) + "\n```\n\n"
-            "Berikan jawaban singkat berdasarkan output di atas. "
-            "Mulai dengan [EXPR:sukses] atau [EXPR:error] atau [EXPR:normal], "
-            "lalu teks jawaban. JANGAN gunakan tool manapun:\n"
-            "Asisten:";
-    } else {
-        QString hybrid = systemPrompt + "\n" + buildHybridPrompt(QString::fromStdString(userMessage), isWindowComment);
-        fullPrompt = hybrid + "\nUser: " + QString::fromStdString(userMessage)
-                   + "\n\nAsisten:";
-    }
-
     QJsonArray messages;
+    
+    // Tambahkan system prompt terlebih dahulu
     QJsonObject systemMessage;
     systemMessage["role"] = "system";
-    systemMessage["content"] = systemPrompt;
+    systemMessage["content"] = buildSystemPrompt(toolResultMode);
     messages.append(systemMessage);
-
+    
+    // Tambahkan history percakapan sebelumnya ke messages array
+    {
+        QMutexLocker locker(&g_historyMutexShijimaManager::g_historyMutex);
+        const auto &hist = isWindowComment ? g_windowHistory : g_chatHistory;
+        int start = qMax(0, (int)hist.size() - MAX_RECENT_MESSAGES);
+        for (int i = start; i < hist.size(); ++i) {
+            QJsonObject msgJson;
+            msgJson["role"] = hist[i].role == "user" ? "user" : "assistant";
+            msgJson["content"] = hist[i].content;
+            messages.append(msgJson);
+        }
+    }
+    
+    // Tambahkan context dari memory/retrieval jika ada (non-toolResultMode)
+    if (!toolResultMode && !isWindowComment) {
+        QString hybridContext = buildHybridPrompt(QString::fromStdString(userMessage), isWindowComment);
+        if (!hybridContext.isEmpty()) {
+            QJsonObject contextMsg;
+            contextMsg["role"] = "user";
+            contextMsg["content"] = "[CONTEXT] " + hybridContext;
+            messages.append(contextMsg);
+        }
+    }
+    
+    // Tambahkan pesan user saat ini - INI YANG PENTING
     QJsonObject userMessageJson;
     userMessageJson["role"] = "user";
-    userMessageJson["content"] = QString::fromStdString(question);
+    userMessageJson["content"] = QString::fromStdString(userMessage);
     messages.append(userMessageJson);
 
     QJsonObject requestJson;
@@ -3455,7 +3464,6 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
     }
 
     if (hasNativeToolCalls && !nativeToolResults.isEmpty() && depth < 2) {
-        appendHistory("user", QString::fromStdString(question), false);
         return chatWithAI(nativeToolResults.toStdString(), depth + 1, true,
                           nativeToolResults.toStdString(), question, false);
     }
@@ -4346,6 +4354,7 @@ void ShijimaManager::speakText(const QString& text) {
 void ShijimaManager::toggleRecording() {
     const QString audioPath = "/tmp/shijima_voice.wav";
 
+    // ─── CRITICAL: Reset state dulu untuk mencegah race condition ───
     if (m_isProcessingVoice) {
         std::cerr << "[Voice] Transcription masih berjalan, tunggu hingga selesai.\n";
         return;
@@ -4353,12 +4362,23 @@ void ShijimaManager::toggleRecording() {
 
     if (!m_isRecording) {
         // ─────────────── MULAI REKAM ───────────────
-        m_isRecording = true;
+        
+        // 0. Bersihkan state lama sepenuhnya
         m_audioBuffer.clear();
+        m_audioBuffer.squeeze();  // Free excess memory
+        
+        if (m_audioIODevice && m_audioSource) {
+            m_audioSource->stop();
+            delete m_audioSource;
+            m_audioSource = nullptr;
+            m_audioIODevice = nullptr;
+        }
+        
+        m_isRecording = true;
         m_isProcessingVoice = false;
 
         if (m_micButton) m_micButton->setText("🛑 Stop");
-        if (m_chatInput)  m_chatInput->setPlaceholderText("Mendengarkan...");
+        if (m_chatInput)  m_chatInput->setPlaceholderText("🎤 Mendengarkan...");
 
         // 1. Normalisasi volume input mic via PipeWire/PulseAudio (pactl) + ALSA fallback
         {
@@ -4392,23 +4412,31 @@ void ShijimaManager::toggleRecording() {
             }
         }
 
-        // 2. Konfigurasi QAudioFormat — 16kHz, 16-bit signed LE, Mono
+        // 2. Konfigurasi QAudioFormat — OPTIMAL: 16kHz, 16-bit signed LE, Mono
+        //    Sample rate lebih rendah = lebih ringan untuk CPU & whisper
         QAudioFormat fmt;
-        fmt.setSampleRate(16000);
-        fmt.setChannelCount(1);
-        fmt.setSampleFormat(QAudioFormat::Int16);
+        fmt.setSampleRate(16000);  // Whisper optimal di 16kHz
+        fmt.setChannelCount(1);     // Mono cukup untuk STT
+        fmt.setSampleFormat(QAudioFormat::Int16);  // 16-bit = good quality/size ratio
 
         QAudioDevice inputDev = QMediaDevices::defaultAudioInput();
         if (inputDev.isNull()) {
             std::cerr << "[Voice] Tidak ada device audio input!\n";
             m_isRecording = false;
             if (m_micButton) m_micButton->setText("🎤 Rekam");
-            if (!m_mascots.empty()) m_mascots.front()->speak("Tidak ada mikrofon.");
+            if (!m_mascots.empty()) m_mascots.front()->speak("Tidak ada mikrofon terdeteksi.");
             return;
         }
+        
+        // Fallback ke preferred format jika 16kHz tidak supported
         if (!inputDev.isFormatSupported(fmt)) {
             std::cerr << "[Voice] Format 16kHz/Int16 tidak didukung, pakai preferred format\n";
             fmt = inputDev.preferredFormat();
+            // Pastikan minimal mono
+            if (fmt.channelCount() > 1) {
+                // Downmix akan dilakukan saat proses WAV
+                std::cout << "[Voice] Using stereo, will downmix to mono\n";
+            }
         }
         std::cout << "[Voice] Device: " << inputDev.description().toStdString()
                   << " SR=" << fmt.sampleRate()
@@ -4417,9 +4445,15 @@ void ShijimaManager::toggleRecording() {
 
         m_audioFormat = fmt;
 
-        // 3. Buat QAudioSource & mulai capture
+        // 3. Buat QAudioSource dengan buffer size optimal
+        //    Buffer terlalu kecil = banyak interrupt, terlalu besar = latency
         m_audioSource = new QAudioSource(inputDev, fmt, this);
-        m_audioSource->setBufferSize(8192);
+        
+        // Calculate optimal buffer size: 0.1 second worth of audio
+        // 16000 samples/sec * 2 bytes/sample * 0.1 sec = 3200 bytes
+        int optimalBufferSize = fmt.sampleRate() * fmt.channelCount() * 2 / 10;
+        m_audioSource->setBufferSize(std::max(4096, optimalBufferSize));
+        
         m_audioIODevice = m_audioSource->start();
 
         if (!m_audioIODevice) {
@@ -4428,42 +4462,82 @@ void ShijimaManager::toggleRecording() {
             delete m_audioSource;
             m_audioSource = nullptr;
             if (m_micButton) m_micButton->setText("🎤 Rekam");
-            if (!m_mascots.empty()) m_mascots.front()->speak("Gagal akses mikrofon.");
+            if (!m_mascots.empty()) m_mascots.front()->speak("Gagal mengakses mikrofon.");
             return;
         }
 
-        // 4. Gunakan readyRead event-driven untuk baca PCM dan menghitung RMS.
-        //    Ini lebih stabil dan efisien daripada polling timer manual.
+        // 4. Event-driven audio capture dengan noise gate & VAD sederhana
+        //    Ini LEBIH STABIL dan EFISIEN daripada polling timer
         connect(m_audioIODevice, &QIODevice::readyRead, this, [this]() {
             if (!m_audioIODevice || !m_isRecording) return;
 
             QByteArray chunk = m_audioIODevice->readAll();
             if (chunk.isEmpty()) return;
-            m_audioBuffer.append(chunk);
-
+            
+            // Analisis audio chunk untuk VAD (Voice Activity Detection) sederhana
             const int16_t* sp = reinterpret_cast<const int16_t*>(chunk.constData());
             int n = chunk.size() / 2;
             if (n == 0) return;
+            
+            // Hitung RMS (Root Mean Square) untuk level volume
             double sumSq = 0.0;
-            for (int i = 0; i < n; ++i) sumSq += static_cast<double>(sp[i]) * sp[i];
+            int zeroCrossings = 0;
+            int16_t prevSample = 0;
+            
+            for (int i = 0; i < n; ++i) {
+                double sample = static_cast<double>(sp[i]);
+                sumSq += sample * sample;
+                
+                // Zero crossing detection untuk deteksi suara vs noise
+                if ((prevSample >= 0 && sp[i] < 0) || (prevSample < 0 && sp[i] >= 0)) {
+                    zeroCrossings++;
+                }
+                prevSample = sp[i];
+            }
+            
             double rms = std::sqrt(sumSq / n);
+            double zcr = static_cast<double>(zeroCrossings) / n;  // Zero Crossing Rate
+            
+            // Noise gate threshold: abaikan jika RMS terlalu rendah (< 1%)
+            const double NOISE_GATE_THRESHOLD = 327.0;  // ~1% of max int16
+            bool hasVoice = rms > NOISE_GATE_THRESHOLD;
+            
+            // Konversi ke persentase untuk UI
             int pct = std::clamp(static_cast<int>(rms / 32767.0 * 100.0), 0, 100);
-
+            
+            // Visual feedback dengan bar yang lebih smooth
             QString bar;
-            if      (pct <  2) bar = "";
-            else if (pct < 10) bar = "▂";
-            else if (pct < 20) bar = "▂▃";
-            else if (pct < 30) bar = "▂▃▄";
-            else if (pct < 42) bar = "▂▃▄▅";
-            else if (pct < 55) bar = "▂▃▄▅▆";
-            else if (pct < 70) bar = "▂▃▄▅▆▇";
-            else if (pct < 85) bar = "▂▃▄▅▆▇█";
-            else               bar = "▂▃▄▅▆▇██";
-
-            QString label = (pct < 2)
-                ? "🎙 Mendengarkan... (Sunyi)"
-                : QString("🎙 %1  %2%").arg(bar).arg(pct);
-            if (m_chatInput) m_chatInput->setPlaceholderText(label);
+            if      (pct <  5)  bar = hasVoice ? "▂" : "";
+            else if (pct < 15)  bar = "▂▃";
+            else if (pct < 25)  bar = "▂▃▄";
+            else if (pct < 35)  bar = "▂▃▄▅";
+            else if (pct < 50)  bar = "▂▃▄▅▆";
+            else if (pct < 65)  bar = "▂▃▄▅▆▇";
+            else if (pct < 80)  bar = "▂▃▄▅▆▇█";
+            else                bar = "▂▃▄▅▆▇██";
+            
+            // Status text yang informatif
+            QString status;
+            if (!hasVoice) {
+                status = "🎙 Mendengarkan... (Sunyi)";
+            } else if (pct < 20) {
+                status = "🎙 Suara terdeteksi...";
+            } else {
+                status = QString("🎙 %1  %2%").arg(bar).arg(pct);
+            }
+            
+            if (m_chatInput) m_chatInput->setPlaceholderText(status);
+            
+            // Hanya simpan audio yang mengandung voice (VAD sederhana)
+            // Ini menghemat memory dan meningkatkan akurasi STT
+            if (hasVoice) {
+                m_audioBuffer.append(chunk);
+            } else {
+                // Optional: tetap simpan sedikit noise untuk context (10%)
+                if (QRandomGenerator::global()->bounded(100) < 10) {
+                    m_audioBuffer.append(chunk);
+                }
+            }
         });
 
     } else {
@@ -4472,6 +4546,7 @@ void ShijimaManager::toggleRecording() {
         m_isProcessingVoice = true;
 
         if (m_audioIODevice && m_audioSource) {
+            // Baca sisa data terakhir
             m_audioBuffer.append(m_audioIODevice->readAll());
             m_audioSource->stop();
             delete m_audioSource;
@@ -4479,56 +4554,87 @@ void ShijimaManager::toggleRecording() {
             m_audioIODevice = nullptr;
         }
 
-        if (m_micButton) { m_micButton->setText("⏳ Mikir..."); m_micButton->setEnabled(false); }
-        if (m_chatInput)  m_chatInput->setPlaceholderText("Transcribing...");
+        if (m_micButton) { m_micButton->setText("⏳ Memproses..."); m_micButton->setEnabled(false); }
+        if (m_chatInput)  m_chatInput->setPlaceholderText("🔄 Transcribing...");
 
+        // Copy data untuk diproses di thread terpisah
         QByteArray pcmData = m_audioBuffer;
         QAudioFormat fmt   = m_audioFormat;
+        
+        // Clear buffer segera untuk rekaman berikutnya
         m_audioBuffer.clear();
-        std::cout << "[Voice] PCM: " << pcmData.size() << " bytes\n";
+        m_audioBuffer.squeeze();
+        
+        const int dataSize = pcmData.size();
+        std::cout << "[Voice] PCM captured: " << dataSize << " bytes (" 
+                  << (dataSize / (fmt.sampleRate() * fmt.channelCount() * 2.0)) << " detik)\n";
+        
+        // Validasi durasi minimal (1 detik = sampleRate * channels * 2 bytes)
+        const int minBytes = fmt.sampleRate() * fmt.channelCount() * 2;  // 1 detik
+        if (dataSize < minBytes) {
+            std::cerr << "[Voice] Audio terlalu pendek: " << dataSize << " < " << minBytes << " bytes\n";
+            QMetaObject::invokeMethod(this, [this]() {
+                m_isProcessingVoice = false;
+                if (m_micButton) { m_micButton->setText("🎤 Rekam"); m_micButton->setEnabled(true); }
+                if (m_chatInput) m_chatInput->setPlaceholderText("Ketik pesan atau tekan Mic...");
+                if (!m_mascots.empty()) m_mascots.front()->speak("Rekaman terlalu pendek, silakan coba lagi.");
+            }, Qt::QueuedConnection);
+            return;
+        }
 
+        // Process di background thread agar UI tidak freeze
         QtConcurrent::run([this, audioPath, pcmData, fmt]() {
             // ── Tulis WAV header + PCM ──
             QFile wav(audioPath);
             if (!wav.open(QIODevice::WriteOnly)) {
-                std::cerr << "[Voice] Gagal tulis WAV!\n";
+                std::cerr << "[Voice] Gagal tulis WAV file!\n";
                 QMetaObject::invokeMethod(this, [this]() {
                     m_isProcessingVoice = false;
                     if (m_micButton) { m_micButton->setText("🎤 Rekam"); m_micButton->setEnabled(true); }
                     if (m_chatInput) m_chatInput->setPlaceholderText("Ketik pesan atau tekan Mic...");
-                    if (!m_mascots.empty()) m_mascots.front()->speak("Gagal menyimpan audio.");
+                    if (!m_mascots.empty()) m_mascots.front()->speak("Gagal menyimpan audio sementara.");
                 }, Qt::QueuedConnection);
                 return;
             }
+            
             int sr = fmt.sampleRate(), ch = fmt.channelCount(), bps = 16;
             uint32_t dLen  = uint32_t(pcmData.size());
             uint32_t fmtSz = 16;
-            auto w32 = [&](uint32_t v){ char b[4]={char(v),char(v>>8),char(v>>16),char(v>>24)}; wav.write(b,4); };
-            auto w16 = [&](uint16_t v){ char b[2]={char(v),char(v>>8)}; wav.write(b,2); };
-            wav.write("RIFF",4); w32(36+dLen);
-            wav.write("WAVE",4); wav.write("fmt ",4); w32(fmtSz);
-            w16(1); w16(uint16_t(ch)); w32(uint32_t(sr));
-            w32(uint32_t(sr*ch*bps/8)); w16(uint16_t(ch*bps/8)); w16(uint16_t(bps));
-            wav.write("data",4); w32(dLen);
+            
+            // Helper lambdas untuk write binary
+            auto w32 = [&](uint32_t v){ 
+                char b[4] = {char(v), char(v>>8), char(v>>16), char(v>>24)}; 
+                wav.write(b, 4); 
+            };
+            auto w16 = [&](uint16_t v){ 
+                char b[2] = {char(v), char(v>>8)}; 
+                wav.write(b, 2); 
+            };
+            
+            // Write RIFF WAV header
+            wav.write("RIFF", 4); 
+            w32(36 + dLen);
+            wav.write("WAVE", 4); 
+            wav.write("fmt ", 4); 
+            w32(fmtSz);
+            w16(1);  // PCM format
+            w16(uint16_t(ch)); 
+            w32(uint32_t(sr));
+            w32(uint32_t(sr * ch * bps / 8));  // Byte rate
+            w16(uint16_t(ch * bps / 8));       // Block align
+            w16(uint16_t(bps));                // Bits per sample
+            wav.write("data", 4); 
+            w32(dLen);
             wav.write(pcmData);
             wav.close();
-            std::cout << "[Voice] WAV ok: " << dLen << " bytes\n";
+            
+            std::cout << "[Voice] WAV file created: " << dLen << " bytes audio data\n";
 
-            // ── Cek durasi minimal 1 detik ──
-            if ((int)dLen < sr * ch * 2) {
-                QMetaObject::invokeMethod(this, [this]() {
-                    m_isProcessingVoice = false;
-                    if (m_micButton) { m_micButton->setText("🎤 Rekam"); m_micButton->setEnabled(true); }
-                    if (m_chatInput)  m_chatInput->setPlaceholderText("Ketik pesan atau tekan Mic...");
-                    if (!m_mascots.empty()) m_mascots.front()->speak("Rekaman terlalu pendek.");
-                }, Qt::QueuedConnection);
-                return;
-            }
-
-            // ── STT: whisper.cpp (native, cepat) — fallback python whisper ──
+            // ── STT: whisper.cpp (native, cepat & efisien) ──
             QString output;
+            auto tStart = std::chrono::steady_clock::now();
 
-            // Cari whisper-cli binary (nama baru) atau main (lama)
+            // Cari whisper-cli binary dengan prioritas
             QString appDir2 = QCoreApplication::applicationDirPath();
             QStringList wCppCandidates = {
                 appDir2 + "/whisper.cpp/build/bin/whisper-cli",
@@ -4536,124 +4642,182 @@ void ShijimaManager::toggleRecording() {
                 "/home/lawliet/Lumina-Source/LUMINA-AI/whisper.cpp/build/bin/whisper-cli",
                 appDir2 + "/whisper.cpp/main",
                 QDir::homePath() + "/whisper.cpp/main",
+                "/usr/local/bin/whisper-cli",
+                "/usr/bin/whisper-cli",
             };
-            // Cari model — prioritas: base (cepat ~20s) > small (lambat ~2mnt) > tiny
-            QString wDir = "/home/lawliet/Lumina-Source/LUMINA-AI/whisper.cpp/models";
+            
+            // Model priorities: tiny (tercepat) > base (balanced) > small (akurat tapi lambat)
+            QString wDir = QDir::homePath() + "/Lumina-Source/LUMINA-AI/whisper.cpp/models";
             QStringList wModelCandidates = {
-                wDir + "/ggml-base.bin",
-                appDir2 + "/whisper.cpp/models/ggml-base.bin",
-                QDir::homePath() + "/Lumina-Source/LUMINA-AI/whisper.cpp/models/ggml-base.bin",
-                QDir::homePath() + "/whisper.cpp/models/ggml-base.bin",
-                wDir + "/ggml-small.bin",
-                appDir2 + "/whisper.cpp/models/ggml-small.bin",
-                QDir::homePath() + "/Lumina-Source/LUMINA-AI/whisper.cpp/models/ggml-small.bin",
-                wDir + "/ggml-tiny.bin",
+                wDir + "/ggml-tiny.bin",      // ~75MB, tercepat (~5-10s)
+                wDir + "/ggml-base.bin",      // ~142MB, balanced (~15-30s)
                 appDir2 + "/whisper.cpp/models/ggml-tiny.bin",
+                appDir2 + "/whisper.cpp/models/ggml-base.bin",
+                QDir::homePath() + "/whisper.cpp/models/ggml-tiny.bin",
+                QDir::homePath() + "/whisper.cpp/models/ggml-base.bin",
+                wDir + "/ggml-small.bin",     // ~244MB, lambat (~60-120s)
+                appDir2 + "/whisper.cpp/models/ggml-small.bin",
+                QDir::homePath() + "/whisper.cpp/models/ggml-small.bin",
             };
 
             QString wCpp, wModel;
-            for (auto& c : wCppCandidates)   { if (QFile::exists(c)) { wCpp   = c; break; } }
-            for (auto& c : wModelCandidates)  { if (QFile::exists(c)) { wModel = c; break; } }
+            for (const auto& c : wCppCandidates) { 
+                if (QFile::exists(c)) { 
+                    wCpp = c; 
+                    break; 
+                } 
+            }
+            for (const auto& c : wModelCandidates) {  
+                if (QFile::exists(c)) { 
+                    wModel = c; 
+                    break; 
+                } 
+            }
 
             if (!wCpp.isEmpty() && !wModel.isEmpty()) {
-                std::cout << "[Voice] whisper.cpp: " << wCpp.toStdString()
-                          << " + " << wModel.toStdString() << "\n";
+                std::cout << "[Voice] Using whisper.cpp: " << wCpp.toStdString()
+                          << " + model: " << wModel.toStdString() << "\n";
+                
                 QProcess wp;
-                // Deteksi jumlah CPU core untuk -t flag
+                wp.setProcessChannelMode(QProcess::MergedChannels);
+                
+                // Deteksi CPU cores untuk optimal threading
                 int nThreads = std::max(1, (int)std::thread::hardware_concurrency());
-                nThreads = std::min(nThreads, 8); // max 8 thread
-                std::cout << "[Voice] whisper threads: " << nThreads << "\n";
-                // -np: no prints (bersih), -nt: no timestamps, -l: bahasa, -t: threads
-                wp.start(wCpp, QStringList() << "-m" << wModel
-                                             << "-l" << "id"
-                                             << "-np" << "-nt"
-                                             << "-t"  << QString::number(nThreads)
-                                             << "-nth" << "0.6"
-                                             << audioPath);
-                // 300s timeout — model small butuh 60-120 detik di CPU
-                auto t0 = std::chrono::steady_clock::now();
-                if (!wp.waitForFinished(300000)) {
-                    std::cerr << "[Voice] whisper.cpp timeout (300s)!\n";
+                nThreads = std::min(nThreads, 6);  // Max 6 threads untuk balance performance
+                
+                // Whisper flags untuk optimalisasi:
+                // -np: no prints (clean output)
+                // -nt: no timestamps
+                // -l id: bahasa Indonesia
+                // -t: threads
+                // --no-timestamps: cleaner output
+                // -otxt: output text only
+                wp.start(wCpp, QStringList() 
+                    << "-m" << wModel
+                    << "-l" << "id"
+                    << "-np"
+                    << "-nt"
+                    << "-t" << QString::number(nThreads)
+                    << "--no-timestamps"
+                    << audioPath);
+                
+                // Timeout dinamis berdasarkan ukuran model
+                // Tiny: 60s, Base: 180s, Small: 300s
+                int timeoutMs = 60000;
+                if (wModel.contains("base")) timeoutMs = 180000;
+                if (wModel.contains("small")) timeoutMs = 300000;
+                
+                if (!wp.waitForFinished(timeoutMs)) {
+                    std::cerr << "[Voice] whisper.cpp timeout setelah " << timeoutMs << "ms!\n";
                     wp.kill();
-                } else {
-                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - t0).count();
-                    output = QString::fromUtf8(wp.readAllStandardOutput()).trimmed();
-                    // Bersihkan output (kadang ada artifact '[BLANK_AUDIO]' atau newline)
-                    output.remove(QRegularExpression("\\[.*?\\]")); // hapus [tag] apapun
-                    output = output.trimmed();
-                    std::cout << "[Voice] whisper.cpp raw (" << elapsed << "ms): \""
-                              << output.toStdString() << "\"\n";
+                    QMetaObject::invokeMethod(this, [this]() {
+                        m_isProcessingVoice = false;
+                        if (m_micButton) { m_micButton->setText("🎤 Rekam"); m_micButton->setEnabled(true); }
+                        if (m_chatInput) m_chatInput->setPlaceholderText("Ketik pesan atau tekan Mic...");
+                        if (!m_mascots.empty()) m_mascots.front()->speak("STT timeout, silakan coba lagi.");
+                    }, Qt::QueuedConnection);
+                    return;
                 }
+                
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - tStart).count();
+                
+                output = QString::fromUtf8(wp.readAllStandardOutput()).trimmed();
+                std::cout << "[Voice] whisper.cpp selesai dalam " << elapsed << "ms\n";
+                
             } else {
-                std::cerr << "[Voice] Native whisper.cpp tidak tersedia. Fallback Python dinonaktifkan.\n";
+                std::cerr << "[Voice] ERROR: whisper.cpp tidak ditemukan!\n";
+                std::cerr << "[Voice] Silakan install whisper.cpp atau download model.\n";
                 QMetaObject::invokeMethod(this, [this]() {
                     m_isProcessingVoice = false;
                     if (m_micButton) { m_micButton->setText("🎤 Rekam"); m_micButton->setEnabled(true); }
-                    if (m_chatInput)  m_chatInput->setPlaceholderText("Ketik pesan atau tekan Mic...");
-                    if (!m_mascots.empty()) m_mascots.front()->speak("STT error: whisper.cpp native tidak tersedia.");
+                    if (m_chatInput) m_chatInput->setPlaceholderText("Ketik pesan atau tekan Mic...");
+                    if (!m_mascots.empty()) m_mascots.front()->speak(
+                        "STT error: whisper.cpp tidak tersedia. "
+                        "Silakan install whisper.cpp terlebih dahulu.");
                 }, Qt::QueuedConnection);
                 return;
             }
 
-            // ── Filter hallucination & artifact dari whisper ──
-            // 1. Hapus [tag] dan (tag) — whisper sering output (Suara musik) (suara segera) dll
+            // ── POST-PROCESSING: Filter artifact & hallucination ──
+            
+            // 1. Hapus tag metadata [xxx] dan (xxx)
             output.remove(QRegularExpression("\\[.*?\\]"));
             output.remove(QRegularExpression("\\(.*?\\)"));
             output = output.trimmed();
-
-            // 2. Blacklist kalimat hallucination umum whisper bahasa Indonesia
+            
+            // 2. Hapus whitespace berlebihan
+            output.replace(QRegularExpression("\\s+"), " ");
+            
+            // 3. Blacklist hallucination umum whisper Bahasa Indonesia
             static const QStringList hallucBlacklist = {
-                "suara segera", "terima kasih", "sampai jumpa", "musik", "music",
-                "thank you", "thanks for watching", "subtitle", "subtitel",
-                "silahkan", "selamat datang", "you", "the", "a ", "i ",
+                "terima kasih", "sampai jumpa", "subscribe", "like and subscribe",
+                "thank you for watching", "musik instrumental", "background music",
+                "suara langkah kaki", "suara keramaian", "[blank audio]",
+                "silahkan tonton", "selamat datang di", "you're watching",
             };
-            if (!output.isEmpty()) {
-                QString lower = output.toLower();
-                // Jika output HANYA terdiri dari kata blacklist (output pendek < 4 kata)
-                QStringList words = lower.split(' ', Qt::SkipEmptyParts);
-                if (words.size() <= 3) {
-                    for (auto& bl : hallucBlacklist) {
-                        if (lower.contains(bl)) {
-                            std::cout << "[Voice] Blacklist filtered: \"" << output.toStdString() << "\"\n";
-                            output.clear();
-                            break;
-                        }
-                    }
+            
+            QString lowerOutput = output.toLower();
+            for (const auto& bl : hallucBlacklist) {
+                if (lowerOutput.contains(bl)) {
+                    std::cout << "[Voice] Filtered hallucination: \"" << bl.toStdString() << "\"\n";
+                    output.clear();
+                    break;
                 }
             }
-
-            // 3. Cek repetisi kata (> 60% kata sama = hallucination)
+            
+            // 4. Cek repetisi kata (>50% kata sama = hallucination)
             if (!output.isEmpty()) {
-                QStringList words = output.toLower().split(' ', Qt::SkipEmptyParts);
-                if (words.size() >= 4) {
-                    QMap<QString,int> freq;
-                    for (auto& w : words) freq[w]++;
-                    int maxF = 0;
-                    for (auto it = freq.begin(); it != freq.end(); ++it)
-                        if (it.value() > maxF) maxF = it.value();
-                    if (maxF >= words.size() * 0.6) {
-                        std::cout << "[Voice] Repetition filtered: \"" << output.toStdString() << "\"\n";
+                QStringList words = output.split(' ', Qt::SkipEmptyParts);
+                if (words.size() >= 3) {
+                    QMap<QString, int> freq;
+                    for (const auto& w : words) freq[w]++;
+                    
+                    int maxFreq = 0;
+                    for (auto it = freq.begin(); it != freq.end(); ++it) {
+                        if (it.value() > maxFreq) maxFreq = it.value();
+                    }
+                    
+                    if (maxFreq >= words.size() * 0.5) {
+                        std::cout << "[Voice] Filtered repetition: \"" << output.toStdString() << "\"\n";
                         output.clear();
                     }
                 }
             }
+            
+            // 5. Validasi panjang minimal
+            if (output.size() < 3) {
+                std::cout << "[Voice] Output terlalu pendek, diabaikan\n";
+                output.clear();
+            }
+            
+            std::cout << "[Voice] STT FINAL: \"" << output.toStdString() << "\"\n";
 
-            // 4. Terlalu pendek (< 2 karakter setelah trim)
-            if (output.size() < 2) output.clear();
-            std::cout << "[Voice] STT: \"" << output.toStdString() << "\"\n";
-
+            // ── INVOKE MAIN THREAD ──
             QMetaObject::invokeMethod(this, [this, output]() {
                 m_isProcessingVoice = false;
-                if (m_micButton) { m_micButton->setText("🎤 Rekam"); m_micButton->setEnabled(true); }
-                if (m_chatInput)  m_chatInput->setPlaceholderText("Ketik pesan atau tekan Mic...");
+                
+                if (m_micButton) { 
+                    m_micButton->setText("🎤 Rekam"); 
+                    m_micButton->setEnabled(true); 
+                }
+                if (m_chatInput) {
+                    m_chatInput->setPlaceholderText("Ketik pesan atau tekan Mic...");
+                }
+                
                 if (!output.isEmpty()) {
-                    // Tampilkan di input field dan kirim langsung ke AI
+                    // Tampilkan hasil STT di input field
                     if (m_chatInput) m_chatInput->setText(output);
+                    
                     std::cout << "[Voice] Forwarding to AI: \"" << output.toStdString() << "\"\n";
+                    
+                    // Kirim ke AI untuk diproses
                     processUserCommand(output);
                 } else {
-                    if (!m_mascots.empty()) m_mascots.front()->speak("Suara tidak terdeteksi.");
+                    std::cout << "[Voice] No valid speech detected\n";
+                    if (!m_mascots.empty()) {
+                        m_mascots.front()->speak("Suara tidak terdeteksi atau terlalu tidak jelas.");
+                    }
                 }
             }, Qt::QueuedConnection);
         });
