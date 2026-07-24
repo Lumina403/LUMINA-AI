@@ -28,6 +28,7 @@ Lumina AI is an AI-powered desktop companion built with native C++ and Qt6 on to
 * Detect and react to active windows
 * Expose functionality through HTTP APIs
 * Display dynamic mascot expressions and behaviors
+* Voice interaction support via local speech-to-text and AI-driven responses
 
 ## Features
 
@@ -181,7 +182,7 @@ Lumina AI is currently under active development. Features, APIs, and agent capab
 - [x] Command execution
 - [x] Web browsing
 - [ ] Multi-model support
-- [ ] Voice interaction
+- [x] Voice interaction
 - [ ] Improved agent autonomy
 - [ ] Additional desktop integrations
 

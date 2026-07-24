@@ -4676,4 +4676,3 @@ void ShijimaManager::applyAIBehavior(const std::string& behaviorName) {
         }
     }
 }
-
