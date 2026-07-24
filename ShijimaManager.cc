@@ -211,7 +211,7 @@ static const QString REGISTRY_PATH =
     QDir::homePath() + "/ShijimaAI/.shijima_files.json";
 
 static void registryLoad() {
-    QMutexLocker locker(&g_filesMutexShijimaManager::g_filesMutex);
+    QMutexLocker locker(&g_filesMutex);
     QFile f(REGISTRY_PATH);
     if (!f.open(QIODevice::ReadOnly)) return;
     QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
@@ -230,7 +230,7 @@ static void registrySave_unlocked() {
 }
 
 static void registryAdd(const QString& filename) {
-    QMutexLocker locker(&g_filesMutexShijimaManager::g_filesMutex);
+    QMutexLocker locker(&g_filesMutex);
     g_createdFiles.insert(filename);
     registrySave_unlocked();
 }
@@ -1282,7 +1282,7 @@ static QString runPython(const QString& filename) {
 
     bool inRegistry = false;
     {
-        QMutexLocker locker(&g_filesMutexShijimaManager::g_filesMutex);
+        QMutexLocker locker(&g_filesMutex);
         inRegistry = g_createdFiles.contains(filename);
     }
     if (!inRegistry) {
@@ -1319,7 +1319,7 @@ static QString runScript(const QString& filename) {
 
     bool inRegistry = false;
     {
-        QMutexLocker locker(&g_filesMutexShijimaManager::g_filesMutex);
+        QMutexLocker locker(&g_filesMutex);
         inRegistry = g_createdFiles.contains(filename);
     }
     if (!inRegistry) {
@@ -2088,7 +2088,7 @@ void ShijimaManager::importWithDialog(QList<QString> const& paths) {
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->show();
 
-    QtConcurrent::run([this, paths](){
+    QThreadPool::globalInstance()->start([this, paths](){
         std::set<std::string> changed;
         for (auto &path : paths) {
             auto newChanged = import(path);
@@ -2332,7 +2332,7 @@ ShijimaManager::ShijimaManager(QWidget *parent):
         m_windowObserverTimer = startTimer(m_windowObserver.tickFrequency());
 
     setWindowFlags((windowFlags() | Qt::CustomizeWindowHint |
-        Qt::MaximizeUsingFullscreenGeometryHint | Qt::WindowMinimizeButtonHint)
+        Qt::ExpandedClientAreaHint | Qt::WindowMinimizeButtonHint)
         & ~Qt::WindowMaximizeButtonHint);
     setManagerVisible(true);
 
@@ -2632,7 +2632,7 @@ void ShijimaManager::tick() {
                          "Teks biasa saja.";
             }
 
-            (void)QtConcurrent::run([this, prompt]() {
+            (void)QThreadPool::globalInstance()->start([this, prompt]() {
                 std::string reply = chatWithAI(
                     prompt.toStdString(), 0, false, {}, {}, true);
                 QMetaObject::invokeMethod(this, [this, reply]() {
@@ -3679,7 +3679,7 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
             if (!allowedTools.contains(functionName)) {
                 std::cerr << "[Self-Correction] Blocked invalid/unknown tool: " 
                           << functionName.toStdString() << std::endl;
-                toolCalls.removeOne(toolCall);
+                toolCalls.removeAt(toolCall);
                 continue;
             }
             
@@ -3913,8 +3913,8 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
             std::cerr << "[AI] toolResultMode mencoba CMD — retry." << std::endl;
             if (depth >= TOOL_CALL_DEPTH_LIMIT - 1) {
                 appendHistory("user", QString::fromStdString(question), false);
-                appendHistory("assistant", "Berdasarkan hasil sistem: " + toolOutput, false);
-                return "Berdasarkan hasil sistem: " + toolOutput.toStdString();
+                appendHistory("assistant", "Berdasarkan hasil sistem: " + QString::fromStdString(toolOutput), false);
+                return "Berdasarkan hasil sistem: " + toolOutput;
             }
             return chatWithAI(userMessage, depth + 1, true,
                               toolOutput, question, false);
@@ -4317,7 +4317,7 @@ void ShijimaManager::processUserCommand(const QString& msg) {
                 "Contoh: /search akun.py");
             return;
         }
-        QtConcurrent::run([this, pattern]() {
+        QThreadPool::globalInstance()->start([this, pattern]() {
             QString hasil = searchFiles(pattern);
             QMetaObject::invokeMethod(this, [this, hasil, pattern]() {
                 makeMascotSpeak("Hasil pencarian '" + pattern + "':\n" + hasil);
@@ -4337,7 +4337,7 @@ void ShijimaManager::processUserCommand(const QString& msg) {
             makeMascotSpeak("[DITOLAK] " + validationErr);
             return;
         }
-        QtConcurrent::run([this, cmd]() {
+        QThreadPool::globalInstance()->start([this, cmd]() {
             QString result = executeCommand(cmd);
             QMetaObject::invokeMethod(this, [this, result]() {
                 makeMascotSpeak(result);
@@ -4399,7 +4399,7 @@ void ShijimaManager::processUserCommand(const QString& msg) {
         QStringList fileList;
         bool isEmpty = false;
         {
-            QMutexLocker locker(&g_filesMutexShijimaManager::g_filesMutex);
+            QMutexLocker locker(&g_filesMutex);
             isEmpty = g_createdFiles.isEmpty();
             if (!isEmpty) {
                 for (const QString& f : g_createdFiles) {
@@ -4451,7 +4451,7 @@ void ShijimaManager::processUserCommand(const QString& msg) {
     }
 
     m_aiRequestActive = true;
-    QtConcurrent::run([this, trimmed]() {
+    QThreadPool::globalInstance()->start([this, trimmed]() {
         std::string reply = chatWithAI(trimmed.toStdString());
         QMetaObject::invokeMethod(this, [this, reply]() {
             if (m_mascots.empty()) {
@@ -4888,7 +4888,7 @@ void ShijimaManager::toggleRecording() {
         }
 
         // Process di background thread agar UI tidak freeze
-        QtConcurrent::run([this, audioPath, pcmData, fmt]() {
+        QThreadPool::globalInstance()->start([this, audioPath, pcmData, fmt]() {
             // ── Tulis WAV header + PCM ──
             QFile wav(audioPath);
             if (!wav.open(QIODevice::WriteOnly)) {
