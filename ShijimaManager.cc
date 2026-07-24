@@ -156,7 +156,7 @@ namespace {
             if (!initialized) {
                 instance.set_connection_timeout(AI_CONNECT_TIMEOUT_SEC, 0);
                 instance.set_keep_alive(true);  // Enable connection reuse
-                instance.set_path_encoding(httplib::PathEncoding::UTF_8);
+                // Note: set_path_encoding not available in this httplib version
                 initialized = true;
             }
             return instance;
@@ -206,6 +206,7 @@ static QString searchFiles(const QString& pattern, int maxResults = 10);
 static QString executeBrowserAction(const QString& action, const QString& param);
 
 // ==================== PERSISTENT FILE REGISTRY ====================
+static QMutex g_filesMutex;  // Global mutex for file operations
 static QSet<QString> g_createdFiles;
 static const QString REGISTRY_PATH =
     QDir::homePath() + "/ShijimaAI/.shijima_files.json";
@@ -2088,14 +2089,13 @@ void ShijimaManager::importWithDialog(QList<QString> const& paths) {
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->show();
 
-    QThreadPool::globalInstance()->start([this, paths](){
+    QThreadPool::globalInstance()->start([this, paths, dialog](){
         std::set<std::string> changed;
         for (auto &path : paths) {
             auto newChanged = import(path);
             changed.insert(newChanged.begin(), newChanged.end());
         }
-        return changed;
-    }).then([this, dialog](std::set<std::string> changed){
+        
         dispatchToMainThread([this, changed, dialog](){
             reloadMascots(changed);
             this->show();
@@ -2332,7 +2332,7 @@ ShijimaManager::ShijimaManager(QWidget *parent):
         m_windowObserverTimer = startTimer(m_windowObserver.tickFrequency());
 
     setWindowFlags((windowFlags() | Qt::CustomizeWindowHint |
-        Qt::ExpandedClientAreaHint | Qt::WindowMinimizeButtonHint)
+        Qt::WindowMinimizeButtonHint)
         & ~Qt::WindowMaximizeButtonHint);
     setManagerVisible(true);
 
@@ -3663,7 +3663,8 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
     
     // SELF-CORRECTION: Validasi tool calls sebelum eksekusi
     if (hasNativeToolCalls) {
-        for (auto toolCall : toolCalls) {
+        for (int i = toolCalls.size() - 1; i >= 0; --i) {
+            QJsonValue toolCall = toolCalls[i];
             if (!toolCall.isObject()) continue;
             
             QJsonObject tcObj = toolCall.toObject();
@@ -3679,7 +3680,7 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
             if (!allowedTools.contains(functionName)) {
                 std::cerr << "[Self-Correction] Blocked invalid/unknown tool: " 
                           << functionName.toStdString() << std::endl;
-                toolCalls.removeAt(toolCall);
+                toolCalls.removeAt(i);
                 continue;
             }
             
