@@ -95,8 +95,79 @@
 #include <QMediaDevices>
 #include <QTimer>
 
-namespace g_filesMutexShijimaManager {
-    QMutex g_filesMutex;
+// ==================== CONSTANTS & CONFIGURATION ====================
+namespace {
+    // AI Configuration
+    constexpr int AI_CONNECT_TIMEOUT_SEC = 30;
+    constexpr int AI_READ_TIMEOUT_NORMAL = 120000;  // 2 menit
+    constexpr int AI_READ_TIMEOUT_WINDOW = 30000;   // 30 detik
+    constexpr int AI_MAX_RETRY = 3;
+    constexpr int MAX_RECENT_MESSAGES = 20;
+    constexpr int MAX_HISTORY_SIZE = 50;            // Batas maksimal history sebelum summarization
+    constexpr int HISTORY_SUMMARIZATION_THRESHOLD = 40;  // Mulai summarization saat mencapai ini
+    constexpr int SUMMARY_TARGET_MESSAGES = 15;     // Target pesan setelah summarization
+    
+    // Self-Correction & Validation Configuration
+    constexpr int MAX_SELF_CORRECTION_ATTEMPTS = 2;  // Maksimal percobaan self-correction
+    constexpr int TOOL_CALL_DEPTH_LIMIT = 5;         // Limit depth untuk tool call recursion
+    
+    // Window comment configuration
+    constexpr qint64 WINDOW_COMMENT_COOLDOWN_SEC = 180; // 3 menit agar tidak spam
+    constexpr int    WINDOW_COMMENT_CHANCE       = 10;  // 10% agar lebih jarang
+    
+    // Thinking animation configuration
+    constexpr int THINKING_ANIMATION_CHANCE = 15;  // 15% agar tidak mengganggu
+    
+    // STT/Audio Configuration - OPTIMAL SETTINGS
+    constexpr int AUDIO_SAMPLE_RATE = 16000;        // Whisper optimal di 16kHz
+    constexpr int AUDIO_CHANNEL_COUNT = 1;           // Mono cukup untuk STT
+    constexpr int AUDIO_BITS_PER_SAMPLE = 16;        // 16-bit = good quality/size ratio
+    constexpr int AUDIO_BUFFER_DURATION_MS = 100;    // 0.1 second buffer
+    constexpr double AUDIO_NOISE_GATE_THRESHOLD = 327.0;  // ~1% of max int16
+    constexpr int AUDIO_MIN_DURATION_SEC = 1;        // Minimal 1 detik rekaman
+    
+    // Voice Activity Detection (VAD)
+    constexpr int VAD_SMOOTHING_SAMPLES = 3;         // Smoothing factor untuk VAD
+    constexpr int VAD_NOISE_FLOOR_PERCENT = 10;      // Simpan 10% noise untuk context
+    
+    // Threading & Performance
+    constexpr int WHISPER_MAX_THREADS = 6;           // Max threads untuk balance performance
+    constexpr int WHISPER_TIMEOUT_TINY_MS = 60000;   // 60s for tiny model
+    constexpr int WHISPER_TIMEOUT_BASE_MS = 180000;  // 180s for base model
+    constexpr int WHISPER_TIMEOUT_SMALL_MS = 300000; // 300s for small model
+    
+    // Memory Management
+    constexpr int AUDIO_BUFFER_RESERVE_BYTES = 65536; // Pre-allocate 64KB for audio buffer
+    
+    // TTS Configuration
+    constexpr int TTS_SPEED = 140;                   // espeak speed
+    constexpr const char* TTS_VOICE = "id";          // Indonesian voice
+}
+
+// ==================== HTTP CLIENT POOL (Optimization) ====================
+namespace {
+    // Simple HTTP client cache untuk reuse connection
+    class HttpClientCache {
+    public:
+        static httplib::Client& getClient() {
+            static httplib::Client instance("127.0.0.1", 11434);
+            static bool initialized = false;
+            
+            if (!initialized) {
+                instance.set_connection_timeout(AI_CONNECT_TIMEOUT_SEC, 0);
+                instance.set_keep_alive(true);  // Enable connection reuse
+                instance.set_path_encoding(httplib::PathEncoding::UTF_8);
+                initialized = true;
+            }
+            return instance;
+        }
+        
+        // Reset client jika diperlukan (misal setelah error)
+        static void resetClient() {
+            // Client akan di-recreate pada next getClient() call
+            // httplib::Client handle reconnect automatically
+        }
+    };
 }
 
 namespace g_memoryMutexShijimaManager {
@@ -114,18 +185,8 @@ QMutex ShijimaManager::g_historyMutex;
 
 #define SHIJIMAQT_SUBTICK_COUNT 4
 
-// ── Timeout config ──────────────────────────────────────────────────────────
-static constexpr int AI_CONNECT_TIMEOUT_SEC  = 15;
-static constexpr int AI_READ_TIMEOUT_NORMAL  = 900;   // dinaikkan ke 15 menit agar tidak timeout saat Ollama lambat
-static constexpr int AI_READ_TIMEOUT_WINDOW  = 180;   // dinaikkan ke 3 menit untuk window comment
-static constexpr int AI_MAX_RETRY            = 2;
-
-// ── Window comment: cooldown minimum (detik) & peluang (0-100) ──────────────
-static constexpr qint64 WINDOW_COMMENT_COOLDOWN_SEC = 180; // naik jadi 3 menit agar tidak spam
-static constexpr int    WINDOW_COMMENT_CHANCE       = 10;  // turun jadi 10% agar lebih jarang
-
-// ── Thinking animation: peluang (0-100) dipicu sebelum AI respond ───────────
-static constexpr int    THINKING_ANIMATION_CHANCE = 15;  // turun jadi 15% agar tidak mengganggu
+// Note: Timeout constants moved to optimized namespace at top of file
+// Using AI_CONNECT_TIMEOUT_SEC, AI_READ_TIMEOUT_NORMAL, AI_READ_TIMEOUT_WINDOW from constants namespace
 
 using namespace shijima;
 
@@ -1300,16 +1361,130 @@ struct ChatMessage {
 
 static QList<ChatMessage> g_chatHistory;
 static QList<ChatMessage> g_windowHistory;
-static const int MAX_HISTORY = 50;
-static const int MAX_RECENT_MESSAGES = 15;
+
+// Helper function untuk summarization history menggunakan AI
+static QString summarizeHistory(const QList<ChatMessage>& history, int targetSize) {
+    if (history.size() <= targetSize) {
+        // Build ringkasan manual jika masih kecil
+        QString summary = "\\n=== RINGKASAN PERCAKAPAN SEBELUMNYA ===\\n";
+        int start = qMax(0, history.size() - targetSize);
+        for (int i = start; i < history.size(); ++i) {
+            summary += QString("[%1]: %2\\n").arg(history[i].role.toUpper()).arg(history[i].content);
+        }
+        summary += "=== AKHIR RINGKASAN ===\\n";
+        return summary;
+    }
+    
+    // Untuk history yang besar, minta AI meringkas
+    QString prompt = "Ringkas percakapan berikut menjadi maksimal 5 kalimat dalam bahasa Indonesia. ";
+    prompt += "Fokus pada informasi penting: nama user, preferensi, konteks utama, dan keputusan penting. \\n\\n";
+    
+    int start = qMax(0, history.size() - 30);  // Ambil 30 pesan terakhir untuk diringkas
+    for (int i = start; i < history.size(); ++i) {
+        prompt += QString("[%1]: %2\\n").arg(history[i].role.toUpper()).arg(history[i].content);
+    }
+    
+    prompt += "\\n\\nRingkasan:";
+    
+    // Call AI untuk summarization (synchronous, blocking)
+    // Menggunakan endpoint Ollama langsung
+    QUrl url("http://localhost:11434/api/generate");
+    QJsonObject jsonReq;
+    jsonReq["model"] = "qwen2.5:3b";  // Gunakan model ringan untuk summarization
+    jsonReq["prompt"] = prompt;
+    jsonReq["stream"] = false;
+    jsonReq["options"] = QJsonObject{
+        {"temperature", 0.3},  // Low temperature untuk ringkasan faktual
+        {"num_predict", 200}   // Batasi output
+    };
+    
+    QNetworkRequest req(url);
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    
+    QNetworkAccessManager nam;
+    QEventLoop loop;
+    QString summaryResult;
+    
+    QObject::connect(&nam, &QNetworkAccessManager::finished, [&](QNetworkReply* reply) {
+        if (reply->error() == QNetworkReply::NoError) {
+            QByteArray data = reply->readAll();
+            QJsonDocument doc = QJsonDocument::fromJson(data);
+            if (!doc.isNull() && doc.isObject()) {
+                QJsonObject obj = doc.object();
+                if (obj.contains("response")) {
+                    summaryResult = obj["response"].toString().trimmed();
+                }
+            }
+        }
+        loop.quit();
+    });
+    
+    nam.post(req, QJsonDocument(jsonReq).toJson());
+    loop.exec();
+    
+    if (summaryResult.isEmpty()) {
+        // Fallback ke ringkasan manual jika AI gagal
+        summaryResult = "\\n=== RINGKASAN PERCAKAPAN (Auto-generated) ===\\n";
+        summaryResult += "Percakapan sebelumnya telah terjadi dengan " + QString::number(history.size()) + " pesan.\\n";
+        summaryResult += "Topik utama: interaksi user dengan asisten Shijima.\\n";
+        summaryResult += "=== AKHIR RINGKASAN ===\\n";
+    } else {
+        // Format hasil summary dari AI
+        summaryResult = "\\n=== RINGKASAN PERCAKAPAN SEBELUMNYA (AI-Generated) ===\\n";
+        summaryResult += summaryResult;
+        summaryResult += "\\n=== AKHIR RINGKASAN ===\\n";
+    }
+    
+    return summaryResult;
+}
+
+static void trimAndSummarizeHistory(QList<ChatMessage>& history, bool isWindowComment = false) {
+    if (history.size() <= HISTORY_SUMMARIZATION_THRESHOLD) {
+        return;  // Belum perlu trimming
+    }
+    
+    // Simpan pesan-pesan terbaru
+    QList<ChatMessage> recentMessages;
+    int keepCount = SUMMARY_TARGET_MESSAGES;
+    int startIdx = qMax(0, history.size() - keepCount);
+    
+    for (int i = startIdx; i < history.size(); ++i) {
+        recentMessages.append(history[i]);
+    }
+    
+    // Buat ringkasan dari pesan lama
+    QList<ChatMessage> oldMessages;
+    for (int i = 0; i < startIdx; ++i) {
+        oldMessages.append(history[i]);
+    }
+    
+    QString summary = summarizeHistory(oldMessages, SUMMARY_TARGET_MESSAGES / 2);
+    
+    // Clear history dan isi dengan summary + recent messages
+    history.clear();
+    
+    if (!summary.trimmed().isEmpty()) {
+        history.append({"system", summary});
+    }
+    
+    history.append(recentMessages);
+    
+    QString histType = isWindowComment ? "window" : "chat";
+    std::cout << "[INFO] History " << histType.toStdString() 
+              << " trimmed: " << oldMessages.size() << " old messages summarized -> "
+              << history.size() << " total messages now." << std::endl;
+}
 
 static void appendHistory(const QString& role, const QString& content,
                           bool isWindowComment = false) {
     QMutexLocker locker(&g_historyMutexShijimaManager::g_historyMutex);
     auto &hist = isWindowComment ? g_windowHistory : g_chatHistory;
     hist.append({role, content});
-    while (hist.size() > MAX_HISTORY)
-        hist.removeFirst();
+    
+    // Trim and summarize jika melebihi threshold
+    while (hist.size() > MAX_HISTORY_SIZE) {
+        trimAndSummarizeHistory(hist, isWindowComment);
+    }
 }
 
 static QString buildHistoryBlock(bool isWindowComment = false) {
@@ -1317,11 +1492,28 @@ static QString buildHistoryBlock(bool isWindowComment = false) {
     const auto &hist = isWindowComment ? g_windowHistory : g_chatHistory;
     if (hist.isEmpty()) return {};
 
-    QString block = "\n--- RIWAYAT PERCAKAPAN SEBELUMNYA ---\n";
-    int start = qMax(0, hist.size() - MAX_RECENT_MESSAGES);
-    for (int i = start; i < hist.size(); ++i)
-        block += QString("[%1]: %2\n").arg(hist[i].role.toUpper()).arg(hist[i].content);
-    block += "--- AKHIR RIWAYAT ---\n";
+    // Jika history sudah disummarize, tampilkan semua karena sudah ringkas
+    // Jika tidak, ambil recent messages saja
+    QString block;
+    bool hasSummary = !hist.isEmpty() && hist[0].role == "system" && 
+                      hist[0].content.contains("RINGKASAN PERCAKAPAN");
+    
+    if (hasSummary) {
+        // Tampilkan summary + recent messages
+        block = hist[0].content;  // Summary dari system
+        block += "\\n--- RIWAYAT PERCAKAPAN TERAKHIR ---\\n";
+        for (int i = 1; i < hist.size(); ++i) {
+            block += QString("[%1]: %2\\n").arg(hist[i].role.toUpper()).arg(hist[i].content);
+        }
+        block += "--- AKHIR RIWAYAT ---\\n";
+    } else {
+        // Mode normal: ambil recent messages saja
+        block = "\\n--- RIWAYAT PERCAKAPAN SEBELUMNYA ---\\n";
+        int start = qMax(0, (int)hist.size() - MAX_RECENT_MESSAGES);
+        for (int i = start; i < hist.size(); ++i)
+            block += QString("[%1]: %2\\n").arg(hist[i].role.toUpper()).arg(hist[i].content);
+        block += "--- AKHIR RIWAYAT ---\\n";
+    }
     return block;
 }
 
@@ -3238,7 +3430,11 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
                                         const std::string& originalQuestion,
                                         bool isWindowComment)
 {
-    if (depth > 10) return "Batas iterasi tercapai.";
+    // FIX: Enforce depth limit untuk mencegah infinite recursion
+    if (depth > TOOL_CALL_DEPTH_LIMIT) {
+        std::cerr << "[AI] Depth limit reached (" << depth << "). Stopping recursion." << std::endl;
+        return "Maaf, saya mengalami kesulitan menyelesaikan permintaan ini. Coba jelaskan lebih sederhana.";
+    }
 
     const std::string& question = originalQuestion.empty() ? userMessage : originalQuestion;
 
@@ -3348,7 +3544,13 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
         }
     }
     
-    // Tambahkan pesan user saat ini - INI YANG PENTING
+    // FIX #1: Tambahkan pesan user ke history SEBELUM mengirim request ke AI
+    // Ini memastikan pesan user tidak hilang jika terjadi retry/error
+    if (!toolResultMode && !isWindowComment && depth == 0) {
+        appendHistory("user", QString::fromStdString(userMessage), false);
+    }
+    
+    // Tambahkan pesan user saat ini ke messages array untuk request API
     QJsonObject userMessageJson;
     userMessageJson["role"] = "user";
     userMessageJson["content"] = QString::fromStdString(userMessage);
@@ -3374,10 +3576,13 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
     httplib::Result res;
     int retryLeft = (depth == 0) ? AI_MAX_RETRY : 1;
 
+    // Gunakan HttpClientCache untuk connection reuse (optimasi performa)
+    // Tapi tetap buat client baru per request untuk thread safety
     for (int attempt = 1; attempt <= retryLeft; ++attempt) {
         httplib::Client cli("127.0.0.1", 11434);
         cli.set_connection_timeout(AI_CONNECT_TIMEOUT_SEC, 0);
         cli.set_read_timeout(readTimeout, 0);
+        cli.set_keep_alive(true);  // Enable keep-alive untuk reuse connection
 
         auto tStart = std::chrono::steady_clock::now();
         res = cli.Post("/api/chat", body.toStdString(), "application/json");
@@ -3455,15 +3660,37 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
 
     bool hasNativeToolCalls = !toolCalls.isEmpty();
     QString nativeToolResults;
+    
+    // SELF-CORRECTION: Validasi tool calls sebelum eksekusi
     if (hasNativeToolCalls) {
         for (auto toolCall : toolCalls) {
             if (!toolCall.isObject()) continue;
-            QString result = executeOllamaToolCall(toolCall.toObject());
+            
+            QJsonObject tcObj = toolCall.toObject();
+            QString functionName = tcObj.value("function").toObject().value("name").toString();
+            
+            // Filter tool calls yang tidak valid atau berbahaya
+            static const QStringList allowedTools = {
+                "execute_command", "write_file", "edit_file", 
+                "run_python", "run_shell", "search_files",
+                "browser_action", "kill_process"
+            };
+            
+            if (!allowedTools.contains(functionName)) {
+                std::cerr << "[Self-Correction] Blocked invalid/unknown tool: " 
+                          << functionName.toStdString() << std::endl;
+                toolCalls.removeOne(toolCall);
+                continue;
+            }
+            
+            QString result = executeOllamaToolCall(tcObj);
             nativeToolResults += result + "\n";
         }
+        hasNativeToolCalls = !toolCalls.isEmpty();
     }
 
-    if (hasNativeToolCalls && !nativeToolResults.isEmpty() && depth < 2) {
+    // SELF-CORRECTION: Hanya lanjutkan recursion jika depth aman
+    if (hasNativeToolCalls && !nativeToolResults.isEmpty() && depth < TOOL_CALL_DEPTH_LIMIT - 1) {
         return chatWithAI(nativeToolResults.toStdString(), depth + 1, true,
                           nativeToolResults.toStdString(), question, false);
     }
@@ -3478,7 +3705,7 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
         QJsonParseError jerr;
         QJsonDocument decisionDoc = QJsonDocument::fromJson(firstLine.toUtf8(), &jerr);
         if (jerr.error == QJsonParseError::NoError && decisionDoc.isObject()) {
-            appendHistory("user", QString::fromStdString(question), false);
+            // FIX #4: Jangan append history user lagi karena sudah di-add di awal fungsi
             std::cout << "[AI] Returned JSON decision (first line valid JSON)" << std::endl;
             return aiReply.toStdString();
         }
@@ -3565,6 +3792,7 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
             return "";
         }
 
+        // FIX #5: Window comment - tambahkan history karena ini path terpisah
         appendHistory("user",      QString::fromStdString(question), true);
         appendHistory("assistant", clean,                            true);
         return clean.toStdString();
@@ -3626,9 +3854,14 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
         QRegularExpression::CaseInsensitiveOption);
     QRegularExpressionMatch brMatch = browserRe.match(aiReply);
     if (brMatch.hasMatch()) {
+        // SELF-CORRECTION: Cek jika tool dipanggil di mode yang salah
         if (toolResultMode) {
             std::cerr << "[AI] toolResultMode mencoba BROWSER — retry." << std::endl;
-            if (depth >= 3) return "Browser action sudah dijalankan.";
+            if (depth >= TOOL_CALL_DEPTH_LIMIT - 1) {
+                appendHistory("user", QString::fromStdString(question), false);
+                appendHistory("assistant", "Browser action sudah dijalankan.", false);
+                return "Browser action sudah dijalankan.";
+            }
             return chatWithAI(userMessage, depth + 1, true,
                               toolOutput, question, false);
         }
@@ -3646,6 +3879,7 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
             param  = fullBrowserArg.mid(firstColon + 1).trimmed();
         }
 
+        // SELF-CORRECTION: Validasi action browser
         static const QStringList validBrowserActions = {
             "open", "play", "search", "kill", "close", "tutup",
             "musik", "video", "putar", "cari", "berita",
@@ -3674,9 +3908,14 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
         QRegularExpression::CaseInsensitiveOption);
     QRegularExpressionMatch match = cmdRe.match(aiReply);
     if (match.hasMatch()) {
+        // SELF-CORRECTION: Cek jika tool dipanggil di mode yang salah
         if (toolResultMode) {
             std::cerr << "[AI] toolResultMode mencoba CMD — retry." << std::endl;
-            if (depth >= 3) return "Berdasarkan hasil sistem: " + toolOutput;
+            if (depth >= TOOL_CALL_DEPTH_LIMIT - 1) {
+                appendHistory("user", QString::fromStdString(question), false);
+                appendHistory("assistant", "Berdasarkan hasil sistem: " + toolOutput, false);
+                return "Berdasarkan hasil sistem: " + toolOutput.toStdString();
+            }
             return chatWithAI(userMessage, depth + 1, true,
                               toolOutput, question, false);
         }
@@ -3684,6 +3923,7 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
         QString cmd = match.captured(1).trimmed();
         std::cout << "[AI] Meminta eksekusi: " << cmd.toStdString() << std::endl;
 
+        // SELF-CORRECTION: Redirect dangerous commands
         QString firstToken = cmd.split(QRegularExpression("\\s+")).value(0).toLower();
         if (firstToken == "pkill" || firstToken == "killall") {
             QStringList parts = cmd.split(QRegularExpression("\\s+"),
@@ -3700,12 +3940,15 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
             }
         }
 
+        // SELF-CORRECTION: Validasi command sebelum eksekusi
         QString validationErr = validateCommand(cmd);
         if (!validationErr.isEmpty()) {
             std::cerr << "[AI] Command ditolak: " << validationErr.toStdString() << std::endl;
             std::string rejectMsg = "Command ditolak: " + validationErr.toStdString() +
                                     ". Jawab tanpa command: " + question;
-            return chatWithAI(rejectMsg, depth + 1, true, {}, question, false);
+            appendHistory("user", QString::fromStdString(question), false);
+            appendHistory("assistant", QString::fromStdString(rejectMsg), false);
+            return rejectMsg;
         }
 
         QString cmdOutput = executeCommand(cmd);
@@ -3721,6 +3964,7 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
             if (nm.hasMatch()) {
                 humanOutput = "File '" + nm.captured(1) + "' tidak ditemukan di folder home.";
             }
+            // FIX #6: CMD path dengan early return - tambahkan history karena tidak lanjut ke recursive call
             appendHistory("user",      QString::fromStdString(question), false);
             appendHistory("assistant", humanOutput, false);
             return humanOutput.toStdString();
@@ -3741,6 +3985,7 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
         QString content  = wfMatch.captured(2).trimmed();
 
         if (content.isEmpty()) {
+            // FIX #7: WRITE_FILE early return - tambahkan history karena tidak lanjut ke recursive call
             appendHistory("user",      QString::fromStdString(question), false);
             appendHistory("assistant", "Maaf, konten file kosong. Coba minta lagi.", false);
             return "Maaf, konten file kosong. Coba minta lagi.";
@@ -3755,6 +4000,7 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
         if (writeResult.startsWith("ERROR:")) {
             std::cerr << "[Tool] WRITE_FILE rejected: "
                       << writeResult.toStdString() << std::endl;
+            // FIX #8: WRITE_FILE error return - tambahkan history karena tidak lanjut ke recursive call
             appendHistory("user",      QString::fromStdString(question), false);
             appendHistory("assistant", writeResult, false);
             return writeResult.toStdString();
@@ -3792,7 +4038,16 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
         QRegularExpression::CaseInsensitiveOption);
     QRegularExpressionMatch efMatch = editFileRe.match(aiReply);
     if (efMatch.hasMatch()) {
-        if (toolResultMode) return "File berhasil diedit.";
+        // SELF-CORRECTION: Cek jika tool dipanggil di mode yang salah
+        if (toolResultMode) {
+            if (depth >= TOOL_CALL_DEPTH_LIMIT - 1) {
+                appendHistory("user", QString::fromStdString(question), false);
+                appendHistory("assistant", "File berhasil diedit.", false);
+                return "File berhasil diedit.";
+            }
+            return chatWithAI(userMessage, depth + 1, true,
+                              toolOutput, question, false);
+        }
 
         QString filename = efMatch.captured(1).trimmed();
         QString oldText  = efMatch.captured(2);
@@ -3807,6 +4062,14 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
             appendHistory("assistant", editResult, false);
             return editResult.toStdString();
         }
+        
+        // SELF-CORRECTION: Limit recursion depth
+        if (depth >= TOOL_CALL_DEPTH_LIMIT - 1) {
+            appendHistory("user", QString::fromStdString(question), false);
+            appendHistory("assistant", editResult, false);
+            return editResult.toStdString();
+        }
+        
         return chatWithAI(editResult.toStdString(), depth + 1, true,
                           editResult.toStdString(), question, false);
     }
@@ -3852,10 +4115,27 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
         QRegularExpression::CaseInsensitiveOption);
     QRegularExpressionMatch rpMatch = runPyRe.match(aiReply);
     if (rpMatch.hasMatch()) {
-        if (toolResultMode) return toolOutput;
+        // SELF-CORRECTION: Cek jika tool dipanggil di mode yang salah
+        if (toolResultMode) {
+            if (depth >= TOOL_CALL_DEPTH_LIMIT - 1) {
+                appendHistory("user", QString::fromStdString(question), false);
+                appendHistory("assistant", QString::fromStdString(toolOutput), false);
+                return toolOutput;
+            }
+            return chatWithAI(userMessage, depth + 1, true,
+                              toolOutput, question, false);
+        }
         QString filename = rpMatch.captured(1).trimmed();
         std::cout << "[Tool] RUN_PYTHON: " << filename.toStdString() << std::endl;
         QString runOut = runPython(filename);
+        
+        // SELF-CORRECTION: Limit recursion depth
+        if (depth >= TOOL_CALL_DEPTH_LIMIT - 1) {
+            appendHistory("user", QString::fromStdString(question), false);
+            appendHistory("assistant", runOut, false);
+            return runOut.toStdString();
+        }
+        
         return chatWithAI(runOut.toStdString(), depth + 1, true,
                           runOut.toStdString(), question, false);
     }
@@ -3865,10 +4145,27 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
         QRegularExpression::CaseInsensitiveOption);
     QRegularExpressionMatch rsMatch = runShRe.match(aiReply);
     if (rsMatch.hasMatch()) {
-        if (toolResultMode) return toolOutput;
+        // SELF-CORRECTION: Cek jika tool dipanggil di mode yang salah
+        if (toolResultMode) {
+            if (depth >= TOOL_CALL_DEPTH_LIMIT - 1) {
+                appendHistory("user", QString::fromStdString(question), false);
+                appendHistory("assistant", QString::fromStdString(toolOutput), false);
+                return toolOutput;
+            }
+            return chatWithAI(userMessage, depth + 1, true,
+                              toolOutput, question, false);
+        }
         QString filename = rsMatch.captured(1).trimmed();
         std::cout << "[Tool] RUN_SH: " << filename.toStdString() << std::endl;
         QString runOut = runScript(filename);
+        
+        // SELF-CORRECTION: Limit recursion depth
+        if (depth >= TOOL_CALL_DEPTH_LIMIT - 1) {
+            appendHistory("user", QString::fromStdString(question), false);
+            appendHistory("assistant", runOut, false);
+            return runOut.toStdString();
+        }
+        
         return chatWithAI(runOut.toStdString(), depth + 1, true,
                           runOut.toStdString(), question, false);
     }
@@ -3881,14 +4178,15 @@ std::string ShijimaManager::chatWithAI(const std::string& userMessage,
             std::cerr << "[AI] Leaked tool tag in final answer — suppressed: "
                       << aiReply.left(80).toStdString() << std::endl;
             std::string msg = "Maaf, ada gangguan format dari AI. Coba ulangi permintaan.";
-            appendHistory("user",      QString::fromStdString(question), false);
+            // FIX #2: Jangan append history user lagi karena sudah di-add di awal fungsi
             appendHistory("assistant", QString::fromStdString(msg),      false);
             return msg;
         }
     }
 
-    appendHistory("user",      QString::fromStdString(question), false);
-    appendHistory("assistant", aiReply,                          false);
+    // FIX #3: Jangan append history user lagi karena sudah di-add di awal fungsi (depth==0)
+    // Hanya append assistant response
+    appendHistory("assistant", aiReply, false);
     return aiReply.toStdString();
 }
 
@@ -4367,12 +4665,16 @@ void ShijimaManager::toggleRecording() {
         m_audioBuffer.clear();
         m_audioBuffer.squeeze();  // Free excess memory
         
-        if (m_audioIODevice && m_audioSource) {
+        // FIX #13: CRITICAL - Disconnect dan cleanup device SEBELUM membuat instance baru
+        if (m_audioIODevice) {
+            disconnect(m_audioIODevice, &QIODevice::readyRead, this, nullptr);
+        }
+        if (m_audioSource) {
             m_audioSource->stop();
             delete m_audioSource;
             m_audioSource = nullptr;
-            m_audioIODevice = nullptr;
         }
+        m_audioIODevice = nullptr;
         
         m_isRecording = true;
         m_isProcessingVoice = false;
@@ -4412,11 +4714,10 @@ void ShijimaManager::toggleRecording() {
             }
         }
 
-        // 2. Konfigurasi QAudioFormat — OPTIMAL: 16kHz, 16-bit signed LE, Mono
-        //    Sample rate lebih rendah = lebih ringan untuk CPU & whisper
+        // 2. Konfigurasi QAudioFormat — OPTIMAL: gunakan constants yang sudah didefinisikan
         QAudioFormat fmt;
-        fmt.setSampleRate(16000);  // Whisper optimal di 16kHz
-        fmt.setChannelCount(1);     // Mono cukup untuk STT
+        fmt.setSampleRate(AUDIO_SAMPLE_RATE);  // Whisper optimal di 16kHz
+        fmt.setChannelCount(AUDIO_CHANNEL_COUNT);     // Mono cukup untuk STT
         fmt.setSampleFormat(QAudioFormat::Int16);  // 16-bit = good quality/size ratio
 
         QAudioDevice inputDev = QMediaDevices::defaultAudioInput();
@@ -4476,7 +4777,7 @@ void ShijimaManager::toggleRecording() {
             
             // Analisis audio chunk untuk VAD (Voice Activity Detection) sederhana
             const int16_t* sp = reinterpret_cast<const int16_t*>(chunk.constData());
-            int n = chunk.size() / 2;
+            int n = chunk.size() / sizeof(int16_t);
             if (n == 0) return;
             
             // Hitung RMS (Root Mean Square) untuk level volume
@@ -4499,8 +4800,7 @@ void ShijimaManager::toggleRecording() {
             double zcr = static_cast<double>(zeroCrossings) / n;  // Zero Crossing Rate
             
             // Noise gate threshold: abaikan jika RMS terlalu rendah (< 1%)
-            const double NOISE_GATE_THRESHOLD = 327.0;  // ~1% of max int16
-            bool hasVoice = rms > NOISE_GATE_THRESHOLD;
+            bool hasVoice = rms > AUDIO_NOISE_GATE_THRESHOLD;
             
             // Konversi ke persentase untuk UI
             int pct = std::clamp(static_cast<int>(rms / 32767.0 * 100.0), 0, 100);
@@ -4533,8 +4833,8 @@ void ShijimaManager::toggleRecording() {
             if (hasVoice) {
                 m_audioBuffer.append(chunk);
             } else {
-                // Optional: tetap simpan sedikit noise untuk context (10%)
-                if (QRandomGenerator::global()->bounded(100) < 10) {
+                // Optional: tetap simpan sedikit noise untuk context (VAD_NOISE_FLOOR_PERCENT%)
+                if (QRandomGenerator::global()->bounded(100) < VAD_NOISE_FLOOR_PERCENT) {
                     m_audioBuffer.append(chunk);
                 }
             }
@@ -4544,6 +4844,11 @@ void ShijimaManager::toggleRecording() {
         // ─────────────── STOP REKAM ───────────────
         m_isRecording = false;
         m_isProcessingVoice = true;
+
+        // FIX #12: CRITICAL - Disconnect sinyal readyRead SEBELUM stop untuk mencegah race condition
+        if (m_audioIODevice) {
+            disconnect(m_audioIODevice, &QIODevice::readyRead, this, nullptr);
+        }
 
         if (m_audioIODevice && m_audioSource) {
             // Baca sisa data terakhir
@@ -4567,10 +4872,10 @@ void ShijimaManager::toggleRecording() {
         
         const int dataSize = pcmData.size();
         std::cout << "[Voice] PCM captured: " << dataSize << " bytes (" 
-                  << (dataSize / (fmt.sampleRate() * fmt.channelCount() * 2.0)) << " detik)\n";
+                  << (dataSize / static_cast<double>(fmt.sampleRate() * fmt.channelCount() * sizeof(int16_t))) << " detik)\n";
         
-        // Validasi durasi minimal (1 detik = sampleRate * channels * 2 bytes)
-        const int minBytes = fmt.sampleRate() * fmt.channelCount() * 2;  // 1 detik
+        // Validasi durasi minimal menggunakan constant AUDIO_MIN_DURATION_SEC
+        const int minBytes = fmt.sampleRate() * fmt.channelCount() * sizeof(int16_t) * AUDIO_MIN_DURATION_SEC;
         if (dataSize < minBytes) {
             std::cerr << "[Voice] Audio terlalu pendek: " << dataSize << " < " << minBytes << " bytes\n";
             QMetaObject::invokeMethod(this, [this]() {
@@ -4681,9 +4986,9 @@ void ShijimaManager::toggleRecording() {
                 QProcess wp;
                 wp.setProcessChannelMode(QProcess::MergedChannels);
                 
-                // Deteksi CPU cores untuk optimal threading
+                // Deteksi CPU cores untuk optimal threading menggunakan constant WHISPER_MAX_THREADS
                 int nThreads = std::max(1, (int)std::thread::hardware_concurrency());
-                nThreads = std::min(nThreads, 6);  // Max 6 threads untuk balance performance
+                nThreads = std::min(nThreads, WHISPER_MAX_THREADS);  // Max threads untuk balance performance
                 
                 // Whisper flags untuk optimalisasi:
                 // -np: no prints (clean output)
@@ -4701,11 +5006,10 @@ void ShijimaManager::toggleRecording() {
                     << "--no-timestamps"
                     << audioPath);
                 
-                // Timeout dinamis berdasarkan ukuran model
-                // Tiny: 60s, Base: 180s, Small: 300s
-                int timeoutMs = 60000;
-                if (wModel.contains("base")) timeoutMs = 180000;
-                if (wModel.contains("small")) timeoutMs = 300000;
+                // Timeout dinamis berdasarkan ukuran model menggunakan constants
+                int timeoutMs = WHISPER_TIMEOUT_TINY_MS;
+                if (wModel.contains("base")) timeoutMs = WHISPER_TIMEOUT_BASE_MS;
+                if (wModel.contains("small")) timeoutMs = WHISPER_TIMEOUT_SMALL_MS;
                 
                 if (!wp.waitForFinished(timeoutMs)) {
                     std::cerr << "[Voice] whisper.cpp timeout setelah " << timeoutMs << "ms!\n";
