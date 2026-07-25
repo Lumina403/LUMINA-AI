@@ -2,10 +2,13 @@
 # Compiled and build artifacts
 *.a
 *.o
+*.d
 *.obj
 *.moc
 # Build directories
 build/
 target/
 dist/
+publish/
+Platform/Linux/.work/node_modules/
 ```
