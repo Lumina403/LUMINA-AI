@@ -98,8 +98,8 @@
 // ==================== CONSTANTS & CONFIGURATION ====================
 namespace {
     // AI Configuration
-    constexpr int AI_CONNECT_TIMEOUT_SEC = 30;
-    constexpr int AI_READ_TIMEOUT_NORMAL = 120000;  // 2 menit
+    constexpr int AI_CONNECT_TIMEOUT_SEC = 300000;
+    constexpr int AI_READ_TIMEOUT_NORMAL = 1800000;  // 2 menit
     constexpr int AI_READ_TIMEOUT_WINDOW = 30000;   // 30 detik
     constexpr int AI_MAX_RETRY = 3;
     constexpr int MAX_RECENT_MESSAGES = 20;
@@ -132,7 +132,7 @@ namespace {
     
     // Threading & Performance
     constexpr int WHISPER_MAX_THREADS = 6;           // Max threads untuk balance performance
-    constexpr int WHISPER_TIMEOUT_TINY_MS = 60000;   // 60s for tiny model
+    constexpr int WHISPER_TIMEOUT_TINY_MS = 600000000;   // 60s for tiny model
     constexpr int WHISPER_TIMEOUT_BASE_MS = 180000;  // 180s for base model
     constexpr int WHISPER_TIMEOUT_SMALL_MS = 300000; // 300s for small model
     
@@ -5015,6 +5015,25 @@ void ShijimaManager::toggleRecording() {
                 if (!wp.waitForFinished(timeoutMs)) {
                     std::cerr << "[Voice] whisper.cpp timeout setelah " << timeoutMs << "ms!\n";
                     wp.kill();
+                    QString rawOutput = wp.readAllStandardOutput();
+                    QStringList lines = rawOutput.split('\n');
+                    QString cleanText;
+
+                    for (const QString& line : lines) {
+                         QString trimmed = line.trimmed();
+                    // Abaikan baris yang mengandung log teknis whisper.cpp
+                         if (trimmed.isEmpty() || 
+                             trimmed.contains("read_audio_data") || 
+                             trimmed.contains("trying to decode") ||
+                             trimmed.contains("main:") ||
+                             trimmed.contains("whisper_")) {
+                             continue;
+                         }
+                         cleanText += trimmed + " ";
+                     }
+
+                     output = cleanText.trimmed();
+                     std::cout << "[Voice] Clean STT Result: " << output.toStdString() << "\n";
                     QMetaObject::invokeMethod(this, [this]() {
                         m_isProcessingVoice = false;
                         if (m_micButton) { m_micButton->setText("🎤 Rekam"); m_micButton->setEnabled(true); }
