@@ -14,4 +14,6 @@ publish/
 Platform/Linux/.work/node_modules/
 Platform/Linux/.work/package.json
 Platform/Linux/.work/yarn.lock
+DefaultMascot.cc
+whisper.cpp/
 ```
