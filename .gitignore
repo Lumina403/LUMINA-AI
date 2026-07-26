@@ -1,19 +1,15 @@
 ```
 # Compiled and build artifacts
-*.a
 *.o
-*.d
 *.obj
-*.moc
-licenses_generated.hpp
-# Build directories
-build/
-target/
-dist/
-publish/
-Platform/Linux/.work/node_modules/
-Platform/Linux/.work/package.json
-Platform/Linux/.work/yarn.lock
-DefaultMascot.cc
-whisper.cpp/
+*.out
+# Dependencies
+node_modules/
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+# Editors
+.vscode/
+.idea/
 ```

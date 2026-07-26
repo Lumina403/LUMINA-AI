@@ -321,8 +321,7 @@ static void userMemorySave() {
     userMemorySave_unlocked();
 }
 
-static void userMemoryDetectTopic(const QString& msg) {
-    QMutexLocker locker(&g_memoryMutexShijimaManager::g_memoryMutex);
+static void userMemoryDetectTopic_unlocked(const QString& msg) {
     QString lower = msg.toLower();
 
     struct TopicRule { QString topic; QStringList keywords; };
@@ -359,6 +358,11 @@ static void userMemoryDetectTopic(const QString& msg) {
             }
         }
     }
+}
+
+static void userMemoryDetectTopic(const QString& msg) {
+    QMutexLocker locker(&g_memoryMutexShijimaManager::g_memoryMutex);
+    userMemoryDetectTopic_unlocked(msg);
 }
 
 static void userMemoryDetectName(const QString& msg) {
@@ -441,7 +445,7 @@ static void userMemoryDetectLang(const QString& msg) {
 static void userMemoryUpdate(const QString& msg) {
     QMutexLocker locker(&g_memoryMutexShijimaManager::g_memoryMutex);
     g_userMemory.totalMessages++;
-    userMemoryDetectTopic(msg);
+    userMemoryDetectTopic_unlocked(msg);
     userMemoryDetectName(msg);
     userMemoryDetectLang(msg);
     if (g_userMemory.totalMessages % 5 == 0)
