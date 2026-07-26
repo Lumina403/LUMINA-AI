@@ -8,7 +8,7 @@ QT_LIBS = Core DBus Widgets
 define bin2c
 echo "#include <stddef.h>" > $(2)
 echo "static const char $(2:.c=)[] = " >> $(2)
-hexdump -v -e '16/1 "_x%02X" "\n"' < $(1) | sed 's/_/\\/g; s/\\x  //g; s/.*/    "&"/' >> $(2)
+xxd -i $(1) | sed 's/unsigned char/static const unsigned char/g; s/0x/\\x/g; s/, /","/g; s/^  "/    "/g; s/"$$/"/g' >> $(2)
 echo ";" >> $(2)
 echo -n "static const size_t $(2:.c=)_len = " >> $(2)
 wc -c < $(1) >> $(2)
