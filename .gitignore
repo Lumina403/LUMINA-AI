@@ -1,15 +1,38 @@
 ```
-# Compiled and build artifacts
+# Build artifacts
+*.d
 *.o
 *.obj
 *.out
+*.so
+*.a
+*.dylib
+*.dll
+*.exe
+
+# Build directories
+build/
+dist/
+target/
+
 # Dependencies
 node_modules/
-# Logs and temp files
+venv/
+.venv/
+__pycache__/
+*.egg-info/
+.Python
+
+# Logs and temporary files
 *.log
 *.tmp
+*.temp
 *.swp
-# Editors
-.vscode/
-.idea/
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Icon?
 ```
