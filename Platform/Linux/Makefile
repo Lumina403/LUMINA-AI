@@ -7,7 +7,7 @@ QT_LIBS = Core DBus Widgets
 
 define bin2c
 echo "#include <stddef.h>" > $(2)
-xxd -i $(1) | sed 's/unsigned char/static const unsigned char/g; ' >> $(2)
+xxd -i $(1) | sed 's/unsigned char gnome_script_zip/static const unsigned char gnome_script/g; s/unsigned char kwin_script_minified_js/static const unsigned char kwin_script/g; s/unsigned char kwin_script/static const unsigned char kwin_script/g' | sed 's/static const static const/static const/g; s/unsigned int [a-z_]*_len.*$$//g' >> $(2)
 echo ";" >> $(2)
 echo -n "static const size_t $(2:.c=)_len = " >> $(2)
 wc -c < $(1) >> $(2)

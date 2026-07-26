@@ -29,7 +29,7 @@ const QString GNOMEWindowObserverBackend::m_gnomeScriptUUID = "shijima-helper@pi
 const QString GNOMEWindowObserverBackend::m_gnomeScriptVersion = "0.1.0";
 
 GNOMEWindowObserverBackend::GNOMEWindowObserverBackend(): m_extensionFile(
-    "shijima_gnome_extension.zip", false, gnome_script, gnome_script_len)
+    "shijima_gnome_extension.zip", false, reinterpret_cast<const char*>(gnome_script), gnome_script_len)
 {
     if (!GNOME::userExtensionsEnabled()) {
         GNOME::setUserExtensionsEnabled(true);
