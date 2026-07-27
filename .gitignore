@@ -16,7 +16,9 @@
 build/
 dist/
 target/
-
+Platform/Linux/.work/package.json
+Platform/Linux/.work/yarn.lock
+Platform/Linux/.work/node_modules/
 # Dependencies
 node_modules/
 venv/
