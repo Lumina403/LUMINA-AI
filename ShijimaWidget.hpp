@@ -66,8 +66,22 @@ public:
             {"thinking",  "SitAndSpinHead"},
             {"surprised", "SitAndFaceMouse"}
         };
+        // Fallback chain: mapped behavior → SitWhileDanglingLegs → Fall
+        static const QStringList fallbackChain = {
+            "", "SitWhileDanglingLegs", "Fall"
+        };
         QString behaviorName = exprToBehavior.value(expr, "SitWhileDanglingLegs");
-        forceBehavior(behaviorName);
+        if (m_mascot->has_behavior(behaviorName.toStdString())) {
+            forceBehavior(behaviorName);
+            return;
+        }
+        for (const auto& fb : fallbackChain) {
+            if (!fb.isEmpty() && m_mascot->has_behavior(fb.toStdString())) {
+                forceBehavior(fb);
+                return;
+            }
+        }
+        // No suitable behavior found — do nothing
     }
     void showInspector();
     void markForDeletion() { m_markedForDeletion = true; }

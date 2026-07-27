@@ -289,18 +289,44 @@ void ShijimaWidget::tick() {
 
     // === EXECUTE TICK ===
     auto prev_frame = m_mascot->state->active_frame;
-    m_mascot->tick();
+    try {
+        m_mascot->tick();
+    } catch (const std::exception& e) {
+        std::cerr << "[ShijimaWidget] Exception in tick(): " << e.what() << std::endl;
+        // Clear the forced behavior that caused the crash
+        m_aiForcedBehavior.clear();
+        m_aiBehaviorPending = false;
+        // Try to recover with a safe fallback if the mascot has it
+        if (m_mascot->has_behavior("Fall")) {
+            try {
+                m_mascot->state->next_subtick = 0;
+                m_mascot->next_behavior("Fall");
+            } catch (...) {}
+        }
+    }
 
     // === AI FULL CONTROL MODE POST-TICK STATE CHECK ===
     if (m_aiFullControl && !m_aiForcedBehavior.isEmpty()) {
         QMutexLocker locker(&m_behaviorMutex);
-        auto active = m_mascot->active_behavior();
-        if (active == nullptr || active->name != m_aiForcedBehavior.toStdString()) {
-            m_mascot->state->next_subtick = 0;
-            m_mascot->next_behavior(m_aiForcedBehavior.toStdString());
+        std::string behaviorName = m_aiForcedBehavior.toStdString();
+        if (!m_mascot->has_behavior(behaviorName)) {
+            // Mascot doesn't have this behavior (e.g. Default-only behavior on a custom mascot)
+            std::cerr << "[ShijimaWidget] Mascot doesn't have behavior '" << behaviorName
+                      << "', clearing forced behavior." << std::endl;
+            m_aiForcedBehavior.clear();
             m_aiBehaviorPending = false;
         }
         else {
+            auto active = m_mascot->active_behavior();
+            if (active == nullptr || active->name != behaviorName) {
+                try {
+                    m_mascot->state->next_subtick = 0;
+                    m_mascot->next_behavior(behaviorName);
+                } catch (const std::exception& e) {
+                    std::cerr << "[ShijimaWidget] next_behavior failed: " << e.what() << std::endl;
+                    m_aiForcedBehavior.clear();
+                }
+            }
             m_aiBehaviorPending = false;
         }
     }
@@ -480,10 +506,16 @@ void ShijimaWidget::enableAIFullControl(bool enable) {
         m_aiBehaviorPending = false;
         m_aiForcedBehavior.clear();
         
-        // FIX: Reset ke behavior default saat disable AI control
-        try {
-            m_mascot->next_behavior("SitWhileDanglingLegs");
-        } catch (...) {}
+        // Reset to a default behavior when disabling AI control
+        static const std::vector<std::string> fallbacks = {
+            "SitWhileDanglingLegs", "Fall"
+        };
+        for (auto& fb : fallbacks) {
+            if (m_mascot->has_behavior(fb)) {
+                try { m_mascot->next_behavior(fb); } catch (...) {}
+                break;
+            }
+        }
     }
 }
 
