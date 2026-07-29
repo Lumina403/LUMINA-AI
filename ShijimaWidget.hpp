@@ -149,7 +149,7 @@ private:
     bool m_paused = false;
     bool m_markedForDeletion = false;
     int m_mascotId;
-    bool m_aiFullControl = true;  // default true, AI pegang kendali
+    bool m_aiFullControl = true;  // AI strictly controls behavior; no random autonomous switches
     bool m_aiBehaviorPending = false;
     QString m_aiForcedBehavior;
 

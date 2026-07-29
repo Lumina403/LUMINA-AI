@@ -4479,16 +4479,8 @@ void ShijimaManager::sendChatMessage() {
 
 // ==================== IDLE AI LOGIC ====================
 void ShijimaManager::tickIdleLogic() {
-    if (m_mascots.empty() || m_aiCommentActive || m_idleBusy || m_aiRequestActive) {
-        return;
-    }
-
-    if (m_idleTicksRemaining <= 0) {
-        m_idleTicksRemaining = QRandomGenerator::global()->bounded(20, 50);
-        triggerIdleAction();
-    } else {
-        m_idleTicksRemaining--;
-    }
+    // Disabled: Behavior is strictly AI-driven on user prompt; no autonomous random idle prompts
+    return;
 }
 
 void ShijimaManager::triggerIdleAction() {
