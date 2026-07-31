@@ -26,8 +26,52 @@
 #include <QBuffer>
 #include <QJsonObject>
 #include <QPixmap>
+#include <QFile>
+#include <QDir>
+#include <QRandomGenerator>
+#include <QStandardPaths>
 
 using namespace httplib;
+
+// ── Token generation helper ──────────────────────────────────────────────────
+static std::string generateApiToken() {
+    // 32 bytes = 64 hex chars — crytographically-sufficient for a local token
+    QByteArray raw;
+    raw.resize(32);
+    for (int i = 0; i < 32; i += 4) {
+        quint32 v = QRandomGenerator::securelySeeded().generate();
+        raw[i]     = (char)(v & 0xFF);
+        raw[i + 1] = (char)((v >> 8) & 0xFF);
+        raw[i + 2] = (char)((v >> 16) & 0xFF);
+        raw[i + 3] = (char)((v >> 24) & 0xFF);
+    }
+    return raw.toHex().toStdString();
+}
+
+static std::string loadOrCreateToken() {
+    QString configDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    QDir().mkpath(configDir);
+    QString tokenPath = configDir + "/api_token";
+    QFile f(tokenPath);
+    if (f.exists() && f.open(QIODevice::ReadOnly)) {
+        std::string token = f.readAll().trimmed().toStdString();
+        f.close();
+        if (!token.empty() && token.size() == 64) {
+            return token;
+        }
+    }
+    // Buat token baru dan simpan ke disk dengan permission hanya user
+    std::string token = generateApiToken();
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        f.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+        f.write(QByteArray::fromStdString(token));
+        f.close();
+    }
+    std::cout << "[API] New API token generated and saved to: "
+              << tokenPath.toStdString() << std::endl;
+    return token;
+}
+// ────────────────────────────────────────────────────────────────────────────
 
 static QJsonObject vecToObject(shijima::math::vec2 vec) {
     QJsonObject obj;
@@ -140,8 +184,11 @@ static bool selectorEval(ShijimaWidget *mascot, std::string const& selector) {
 }
 
 ShijimaHttpApi::ShijimaHttpApi(ShijimaManager *manager): m_server(new Server),
-    m_thread(nullptr), m_manager(manager), m_host(""), m_port(-1)
+    m_thread(nullptr), m_manager(manager), m_host(""), m_port(-1),
+    m_apiToken(loadOrCreateToken())
 {
+    std::cout << "[API] Token auth aktif. Token disimpan di AppConfigLocation/api_token" << std::endl;
+
     m_server->Get("/shijima/api/v1/mascots",
         [this](Request const& req, Response &res)
     {
@@ -368,6 +415,24 @@ ShijimaHttpApi::ShijimaHttpApi(ShijimaManager *manager): m_server(new Server),
         std::string userMessage = messageValue.toString().toStdString();
         std::cout << "[AI] User message: " << userMessage << std::endl;
 
+        // 🔽 1. TAMPILKAN THINKING BUBBLE DULU SAAT LOADING OLLAMA 🔽
+        m_manager->onTickSync([](ShijimaManager *manager){
+            auto &mascots = manager->mascots();
+            if (!mascots.empty()) {
+                static const QStringList thinkingPhrases = {
+                    "Thinking...",
+                    "Bentar, mikir dulu...",
+                    "Hmm, bentar ya...",
+                    "Lagi dipikirin nih...",
+                    "Proses dulu...",
+                    "Sebentar..."
+                };
+                int idx = QRandomGenerator::global()->bounded((int)thinkingPhrases.size());
+                mascots.front()->speak(thinkingPhrases[idx], /*isThinking=*/true);
+                mascots.front()->setExpression("mikir");
+            }
+        });
+
         std::string aiReply;
         try {
             aiReply = m_manager->chatWithAI(userMessage);
@@ -380,12 +445,10 @@ ShijimaHttpApi::ShijimaHttpApi(ShijimaManager *manager): m_server(new Server),
             aiReply = "Terjadi error unknown";
         }
 
-        // 🔽 PERINTAHKAN KARAKTER UNTUK BICARA 🔽
+        // 🔽 2. UPDATE BUBBLE DAN BEHAVIOR SETELAH RESPONS OLLAMA DITERIMA 🔽
         m_manager->onTickSync([aiReply](ShijimaManager *manager){
-            auto &mascots = manager->mascots();
-            if (!mascots.empty()) {
-                // Panggil method speak pada karakter pertama
-                mascots.front()->speak(QString::fromStdString(aiReply));
+            if (!manager->mascots().empty()) {
+                manager->applyDecision(QString::fromStdString(aiReply));
             } else {
                 std::cout << "[AI] No mascot to speak" << std::endl;
             }
@@ -397,6 +460,20 @@ ShijimaHttpApi::ShijimaHttpApi(ShijimaManager *manager): m_server(new Server),
         std::cout << "[AI] Response sent" << std::endl;
     });
     // ========================================================
+
+    // ==================== AUTH MIDDLEWARE ====================
+    // Semua request dicek token sebelum diproses
+    m_server->set_pre_routing_handler([this](const Request& req, Response& res) -> Server::HandlerResponse {
+        // Endpoint /ping tidak perlu auth (health check)
+        if (req.path == "/shijima/api/v1/ping") {
+            return Server::HandlerResponse::Unhandled;
+        }
+        if (!checkAuth(req, res)) {
+            return Server::HandlerResponse::Handled;
+        }
+        return Server::HandlerResponse::Unhandled;
+    });
+    // =========================================================
 
     m_server->Get(".*", badRequest);
     m_server->Put(".*", badRequest);
@@ -454,3 +531,44 @@ ShijimaHttpApi::~ShijimaHttpApi() {
     stop();
     delete m_server;
 }
+
+// ==================== AUTH IMPLEMENTATION ====================
+bool ShijimaHttpApi::checkAuth(const Request& req, Response& res) const {
+    // Ambil token dari header X-Api-Token
+    std::string token = req.get_header_value("X-Api-Token");
+    if (token.empty()) {
+        QJsonObject obj;
+        obj["error"] = "401 Unauthorized: X-Api-Token header wajib disertakan.";
+        QJsonDocument doc(obj);
+        auto bytes = doc.toJson(QJsonDocument::Compact);
+        res.status = 401;
+        res.set_content(&bytes[0], bytes.size(), "application/json");
+        return false;
+    }
+
+    // Constant-time comparison untuk cegah timing attacks
+    if (token.size() != m_apiToken.size()) {
+        QJsonObject obj;
+        obj["error"] = "401 Unauthorized: Token tidak valid.";
+        QJsonDocument doc(obj);
+        auto bytes = doc.toJson(QJsonDocument::Compact);
+        res.status = 401;
+        res.set_content(&bytes[0], bytes.size(), "application/json");
+        return false;
+    }
+    int diff = 0;
+    for (size_t i = 0; i < token.size(); ++i) {
+        diff |= (token[i] ^ m_apiToken[i]);
+    }
+    if (diff != 0) {
+        QJsonObject obj;
+        obj["error"] = "401 Unauthorized: Token tidak valid.";
+        QJsonDocument doc(obj);
+        auto bytes = doc.toJson(QJsonDocument::Compact);
+        res.status = 401;
+        res.set_content(&bytes[0], bytes.size(), "application/json");
+        return false;
+    }
+    return true;
+}
+// =============================================================

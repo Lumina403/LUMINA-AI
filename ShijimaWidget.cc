@@ -32,8 +32,7 @@
 #include <QTimer>
 #include <QMetaObject>
 #include <QPropertyAnimation>
-#include <QMutex>
-#include <QMutexLocker>
+#include <QPointer>
 #include <shijima/shijima.hpp>
 #include "Platform/Platform.hpp"
 #include "ShimejiInspectorDialog.hpp"
@@ -344,14 +343,12 @@ ShijimaWidget::~ShijimaWidget() {
         delete m_inspector;
     }
     setDragTarget(nullptr);
-    if (m_speechBubble) {
-        m_speechBubble->deleteLater();
-        m_speechBubble = nullptr;
-    }
+    // Stop timer synchronously so its lambda never fires after our destruction
     if (m_speechTimer) {
-        m_speechTimer->deleteLater();
-        m_speechTimer = nullptr;
+        m_speechTimer->disconnect();
+        m_speechTimer->stop();
     }
+    // m_speechBubble and m_speechTimer are QPointer → auto-cleared when object is deleted
 }
 
 void ShijimaWidget::setDragTarget(ShijimaWidget *target) {
@@ -423,14 +420,15 @@ void ShijimaWidget::forceBehavior(const QString& behavior) {
     QString trimmed = behavior.trimmed();
     if (trimmed.isEmpty()) return;
 
-    QMutexLocker locker(&m_behaviorMutex);
+    // NOTE: This is always called from the main thread (Qt event loop).
+    // No mutex needed — mascot tick() also runs on main thread.
     std::cout << "[ShijimaWidget] forceBehavior: "
               << trimmed.toStdString() << std::endl;
 
     if (m_aiForcedBehavior == trimmed && !m_aiBehaviorPending) {
         auto active = m_mascot->active_behavior();
         if (active != nullptr && active->name == trimmed.toStdString()) {
-            return;
+            return; // Already in the requested behavior, no-op
         }
     }
 
@@ -453,14 +451,11 @@ void ShijimaWidget::forceBehavior(const QString& behavior) {
 
 void ShijimaWidget::setAIBehavior(const QString& behaviorName) {
     if (!m_aiFullControl) return;
-    
-    QMutexLocker locker(&m_behaviorMutex);
     m_aiForcedBehavior = behaviorName;
     m_aiBehaviorPending = true;
 }
 
 void ShijimaWidget::enableAIFullControl(bool enable) {
-    QMutexLocker locker(&m_behaviorMutex);
     m_aiFullControl = enable;
     if (!enable) {
         m_aiBehaviorPending = false;
@@ -482,16 +477,19 @@ void ShijimaWidget::enableAIFullControl(bool enable) {
 // ==================== SPEECH BUBBLE ====================
 
 void ShijimaWidget::updateBubblePosition() {
-    if (m_speechBubble && m_speechBubble->isVisible()) {
-        QPoint pos = mapToGlobal(QPoint(20, -m_speechBubble->height() - 10));
+    if (m_speechBubble) {
+        int bubbleX = (width() - m_speechBubble->width()) / 2;
+        int bubbleY = -m_speechBubble->height() - 8;
+        QPoint pos = mapToGlobal(QPoint(bubbleX, bubbleY));
         m_speechBubble->move(pos);
     }
 }
 
-void ShijimaWidget::speak(const QString& text) {
+void ShijimaWidget::speak(const QString& text, bool isThinking) {
     std::cout << "[ShijimaWidget] speak: " << text.toStdString() << std::endl;
     
     if (m_speechTimer) {
+        m_speechTimer->disconnect();
         m_speechTimer->stop();
         m_speechTimer->deleteLater();
         m_speechTimer = nullptr;
@@ -500,30 +498,36 @@ void ShijimaWidget::speak(const QString& text) {
     if (m_speechBubble) {
         m_speechBubble->setText(text);
         m_speechBubble->adjustSize();
+        m_speechBubble->setWindowOpacity(1.0);
         updateBubblePosition();
+        m_speechBubble->show();
+        m_speechBubble->raise();
     } else {
         m_speechBubble = new QLabel(text);
-        m_speechBubble->setWindowFlags(Qt::ToolTip | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+        m_speechBubble->setWindowFlags(Qt::ToolTip | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::X11BypassWindowManagerHint);
         m_speechBubble->setAttribute(Qt::WA_TranslucentBackground);
         m_speechBubble->setWordWrap(true);
-        m_speechBubble->setMaximumWidth(200);
+        m_speechBubble->setMaximumWidth(220);
         m_speechBubble->setStyleSheet(
             "QLabel {"
-            "  background-color: white;"
-            "  border: 2px solid black;"
-            "  border-radius: 10px;"
-            "  padding: 8px;"
-            "  font-size: 12px;"
+            "  background-color: #ffffff;"
+            "  color: #111111;"
+            "  border: 2px solid #000000;"
+            "  border-radius: 8px;"
+            "  padding: 6px 10px;"
+            "  font-size: 13px;"
+            "  font-weight: bold;"
             "  font-family: sans-serif;"
             "}"
         );
         m_speechBubble->adjustSize();
-
         updateBubblePosition();
+        m_speechBubble->setWindowOpacity(0.0);
         m_speechBubble->show();
+        m_speechBubble->raise();
 
         QPropertyAnimation *fadeIn = new QPropertyAnimation(m_speechBubble, "windowOpacity");
-        fadeIn->setDuration(200);
+        fadeIn->setDuration(150);
         fadeIn->setStartValue(0.0);
         fadeIn->setEndValue(1.0);
         fadeIn->start(QAbstractAnimation::DeleteWhenStopped);
@@ -531,26 +535,30 @@ void ShijimaWidget::speak(const QString& text) {
 
     m_speechTimer = new QTimer(this);
     m_speechTimer->setSingleShot(true);
-    connect(m_speechTimer, &QTimer::timeout, [this]() {
-        if (m_speechBubble) {
-            QPropertyAnimation *fadeOut = new QPropertyAnimation(m_speechBubble, "windowOpacity");
+
+    // Use QPointer so the lambda is safe even if widget is destroyed before timer fires
+    QPointer<ShijimaWidget> self = this;
+    connect(m_speechTimer, &QTimer::timeout, [self]() {
+        if (!self) return;  // Widget already destroyed — safe exit
+        if (self->m_speechBubble) {
+            QPointer<QLabel> bubble = self->m_speechBubble;
+            QPropertyAnimation *fadeOut = new QPropertyAnimation(self->m_speechBubble, "windowOpacity");
             fadeOut->setDuration(200);
             fadeOut->setStartValue(1.0);
             fadeOut->setEndValue(0.0);
-            connect(fadeOut, &QPropertyAnimation::finished, [this]() {
-                if (m_speechBubble) {
-                    m_speechBubble->deleteLater();
-                    m_speechBubble = nullptr;
-                }
+            connect(fadeOut, &QPropertyAnimation::finished, [bubble]() {
+                if (bubble) bubble->deleteLater();
             });
             fadeOut->start(QAbstractAnimation::DeleteWhenStopped);
+            self->m_speechBubble = nullptr;
         }
-        if (m_speechTimer) {
-            m_speechTimer->deleteLater();
-            m_speechTimer = nullptr;
+        if (self->m_speechTimer) {
+            self->m_speechTimer->deleteLater();
+            self->m_speechTimer = nullptr;
         }
     });
-    // Set duration based on text length, minimum 4 seconds.
-    int duration = qMax(4000, (int)text.length() * 100);
+
+    // isThinking: bubble bertahan 60 detik, di-override seketika saat AI menjawab
+    int duration = isThinking ? 60000 : qMax(4000, (int)text.length() * 100);
     m_speechTimer->start(duration);
 }

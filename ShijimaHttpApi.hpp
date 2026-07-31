@@ -36,12 +36,18 @@ private:
     ShijimaManager *m_manager;
     std::string m_host;
     int m_port;
+    std::string m_apiToken;   // Bearer token untuk auth semua endpoint
+
+    // Cek header X-Api-Token; return false jika invalid (sudah set response 401)
+    bool checkAuth(const httplib::Request& req, httplib::Response& res) const;
 public:
     void start(std::string const& host, int port);
     void stop();
     bool running();
     int port();
     std::string const& host();
+    // Token yang harus disertakan sebagai X-Api-Token header
+    std::string const& apiToken() const { return m_apiToken; }
     ShijimaHttpApi(ShijimaManager *manager);
     ~ShijimaHttpApi();
 };

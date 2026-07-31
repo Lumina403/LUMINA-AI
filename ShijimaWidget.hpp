@@ -22,13 +22,13 @@
 #include <memory>
 #include <QRegion>
 #include <QMap>
+#include <QPointer>
 #include "Asset.hpp"
 #include "SoundEffectManager.hpp"
 #include <shijima/mascot/manager.hpp>
 #include <shijima/mascot/environment.hpp>
 #include "PlatformWidget.hpp"
 #include "MascotData.hpp"
-#include <QMutex>
 
 // Forward declarations for AI speech bubble
 class QLabel;
@@ -108,7 +108,8 @@ public:
     ~ShijimaWidget();
 
     // ==================== AI INTEGRATION ====================
-    void speak(const QString& text);  // menampilkan bubble chat
+    // isThinking=true: bubble bertahan 60 detik (override saat AI selesai)
+    void speak(const QString& text, bool isThinking = false);
     void forceBehavior(const QString& behavior);
 
 protected:
@@ -125,7 +126,6 @@ private:
     void showContextMenu(QPoint const&);
     bool updateOffsets();
     void updateBubblePosition();  // untuk mengikuti pergerakan karakter
-    QMutex m_behaviorMutex;
 
 #ifdef __linux__
     QRegion m_windowMask;
@@ -154,6 +154,7 @@ private:
     QString m_aiForcedBehavior;
 
     // ==================== AI speech bubble members ====================
-    QLabel* m_speechBubble = nullptr;
-    QTimer* m_speechTimer = nullptr;
+    // QPointer auto-nulls when the pointed-to object is destroyed
+    QPointer<QLabel> m_speechBubble;
+    QPointer<QTimer> m_speechTimer;
 };

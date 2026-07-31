@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-<strong>🤖 Powered by Alibaba Cloud's Qwen | 🏠 100% Local Processing | 🔒 Privacy-First</strong>
+<strong>Powered by Alibaba Cloud's Qwen | 100% Local Processing | Privacy-First</strong>
 </p>
 
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue)
@@ -49,7 +49,7 @@ Most desktop mascots are purely cosmetic.
 
 Lumina combines an animated desktop companion with AI agent capabilities powered by **Alibaba's Qwen**, allowing it to understand context, remember information, interact with files, browse the web, execute commands, and respond to the user's desktop activity.
 
-### 🌟 Why Qwen?
+### Why Qwen?
 
 **Qwen** by Alibaba Cloud is one of the most advanced open-source language model families, offering:
 
@@ -79,9 +79,9 @@ Lumina AI aims to bridge the gap between traditional desktop mascots and modern 
 ## Ollama Setup
 
 Lumina AI requires a local Ollama instance and at least one compatible language model.
-> ⚠️ **Recommended**: Current releases are optimized for `qwen2.5:3b` from **Alibaba's Qwen** family, running through Ollama.
+> **Recommended**: Current releases are optimized for `qwen2.5:3b` from **Alibaba's Qwen** family, running through Ollama.
 > 
-> 💡 **Why Qwen?** Qwen models offer exceptional performance-to-size ratio, making them perfect for local deployment while maintaining high-quality responses.
+> **Why Qwen?** Qwen models offer exceptional performance-to-size ratio, making them perfect for local deployment while maintaining high-quality responses.
 
 ### Install Ollama
 
@@ -187,14 +187,14 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)
 
 Lumina AI is built on top of the Shijima-Qt framework and extends it with AI-powered desktop interaction, memory systems, tool execution, automation, web browsing, and local LLM integration.
 
-### 🤖 AI Model
+### AI Model
 
 - **Alibaba Qwen** - Advanced open-source language models by Alibaba Cloud's DAMO Academy
   - Qwen2.5 series: Exceptional performance for local deployment
   - Multilingual support and advanced reasoning capabilities
   - Open weights with permissive licensing
 
-### 🔧 Core Technologies
+### Core Technologies
 
 - **Shijima-Qt** - Desktop mascot rendering framework
 - **libshimejifinder** - Mascot data discovery and loading
@@ -259,5 +259,5 @@ All AI inference is performed locally through Ollama-compatible language models,
 ---
 
 <p align="center">
-<strong>Made with ❤️ using Alibaba Qwen | Local AI for Everyone</strong>
+<strong>Powered by Alibaba Qwen | Local AI for Everyone</strong>
 </p>

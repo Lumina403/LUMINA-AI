@@ -1,5 +1,24 @@
 # Update
 
+## Security, Confirmation System & Speech Bubble Stabilization
+
+### Security Hardening & Isolation
+- **Shell Injection Protection**: Refactored `searchFiles()` to use `QDirIterator` instead of `/bin/sh find`, eliminating shell injection risks with strict input pattern validation.
+- **Process Management Security**: Replaced loose `pkill -f` execution in `killApplication()` with a strict whitelist of safe application binaries.
+- **Browser Navigation Protection**: Blocked `file://` scheme, `localhost`, `127.0.0.1`, and `0.0.0.0` from browser open actions to prevent unauthorized local file access.
+- **HTTP API Authentication**: Implemented a 64-character hexadecimal Bearer Token (`X-Api-Token` header) with constant-time comparison for the local HTTP API (port 32456).
+
+### Smart AI Action Confirmation
+- **Selective User Verification**: Added thread-safe confirmation modal dialogs (`Qt::BlockingQueuedConnection`) for critical AI actions (`RUN_SH` scripts, closing applications, writing files outside sandbox, and dangerous system commands).
+- **Seamless Automation**: Safe actions (opening web URLs, writing/editing files inside `~/ShijimaAI/` sandbox, read-only system queries like `ls`, `cat`, `ps`) run automatically without interrupting the user.
+
+### Speech Bubble & Rendering Fixes
+- **Bubble Positioning Fix**: Fixed `updateBubblePosition()` in `ShijimaWidget.cc` by removing the `isVisible()` prerequisite, ensuring speech bubbles are correctly positioned above the mascot before `show()` and `raise()`.
+- **Crash Prevention**: Utilized `QPointer<QLabel>` and `QPointer<ShijimaWidget>` in animation/timer callbacks to prevent dangling pointer crashes during rapid mascot actions or shutdowns.
+- **High-Contrast Styling**: Standardized speech bubble styling with high-contrast text and explicit window flags for clean rendering on Linux desktop environments.
+
+---
+
 - Stabilized voice interaction flow and removed the older fallback path.
 - Improved AI behavior forcing so walk, jump, climb, and throw actions switch more reliably.
 - Refined the mascot control loop to reduce unstable behavior transitions during voice-driven commands.

@@ -205,6 +205,19 @@ static bool    isPythonContent(const QString& content);
 static QString searchFiles(const QString& pattern, int maxResults = 10);
 static QString executeBrowserAction(const QString& action, const QString& param);
 
+// ==================== AI ACTION CONFIRMATION ====================
+// Callback dipasang dari ShijimaManager constructor agar bisa akses Qt main thread
+// Signature: (judul, deskripsi_detail) -> true=izinkan, false=tolak
+static std::function<bool(const QString&, const QString&)> g_confirmCallback;
+
+// Thread-safe: bisa dipanggil dari background thread.
+// Menggunakan BlockingQueuedConnection untuk blokir caller sambil menampilkan dialog.
+static bool confirmAIAction(const QString& title, const QString& details) {
+    if (!g_confirmCallback) return false;  // Deny by default jika belum diinisialisasi
+    return g_confirmCallback(title, details);
+}
+// ================================================================
+
 // ==================== PERSISTENT FILE REGISTRY ====================
 static QMutex g_filesMutex;  // Global mutex for file operations
 static QSet<QString> g_createdFiles;
@@ -832,6 +845,12 @@ static bool isUriScheme(const QString& q) {
 static QString killApplication(const QString& appName) {
     QString clean = appName.trimmed().toLower();
 
+    // Validasi: nama aplikasi hanya boleh berisi huruf, angka, dash, dan titik
+    static QRegularExpression safeAppRe(R"(^[\w\.\-]+$)");
+    if (!safeAppRe.match(clean).hasMatch() || clean.contains("..") || clean.length() > 64) {
+        return "ERROR: Nama aplikasi tidak valid. Gunakan nama yang sederhana seperti 'firefox'.";
+    }
+
     static const QMap<QString, QString> processNames = {
         {"firefox",     "firefox"},
         {"chromium",    "chromium"},
@@ -854,11 +873,18 @@ static QString killApplication(const QString& appName) {
         {"gedit",       "gedit"},
     };
 
-    QString procName = processNames.value(clean, clean);
+    // Security: hanya izinkan nama yang ada di whitelist — pkill -f sangat luas
+    if (!processNames.contains(clean)) {
+        return "ERROR: Aplikasi '" + appName + "' tidak ada dalam daftar yang bisa ditutup.\n"
+               "Daftar: firefox, chrome, brave, spotify, steam, discord, telegram, vscode, vlc, gimp, inkscape, libreoffice, thunderbird, nautilus, terminal, gedit.";
+    }
+
+    QString procName = processNames.value(clean);
     std::cout << "[Kill] pkill " << procName.toStdString() << std::endl;
 
+    // Gunakan pkill tanpa -f agar tidak match command line arguments — hanya nama binary
     QProcess pkill;
-    pkill.start("pkill", QStringList() << "-f" << procName);
+    pkill.start("pkill", QStringList() << procName);
     if (!pkill.waitForFinished(3000)) {
         pkill.kill();
         return "Timeout saat mencoba menutup " + appName;
@@ -868,13 +894,6 @@ static QString killApplication(const QString& appName) {
     if (exitCode == 0) {
         return "OK: " + appName + " berhasil ditutup.";
     } else if (exitCode == 1) {
-        if (procName != clean) {
-            QProcess pkill2;
-            pkill2.start("pkill", QStringList() << "-f" << clean);
-            pkill2.waitForFinished(3000);
-            if (pkill2.exitCode() == 0)
-                return "OK: " + appName + " berhasil ditutup.";
-        }
         return "ERROR: " + appName + " tidak sedang berjalan.";
     } else {
         return "ERROR: Gagal menutup " + appName + " (exit code: " +
@@ -912,9 +931,21 @@ static QString executeBrowserAction(const QString& action, const QString& param)
             launchBrowserWithUrl(quickUrls[qLower]);
             return "BERHASIL: Membuka " + quickUrls[qLower];
         }
-        if (q.startsWith("http://") || q.startsWith("https://") || q.startsWith("file://")) {
+        // Security: block file:// dan localhost URL untuk cegah akses file lokal
+        if (qLower.startsWith("file://") || qLower.contains("localhost") ||
+            qLower.contains("127.0.0.1") || qLower.contains("0.0.0.0")) {
+            return "ERROR: Tidak diizinkan membuka URL lokal atau file sistem.";
+        }
+        if (q.startsWith("https://")) {
             launchBrowserWithUrl(q);
             return "BERHASIL: Membuka " + q;
+        }
+        // Tolak http:// mentah — hanya izinkan HTTPS untuk keamanan
+        if (q.startsWith("http://")) {
+            // Upgrade ke https jika bukan IP lokal
+            QString upgraded = "https://" + q.mid(7);
+            launchBrowserWithUrl(upgraded);
+            return "BERHASIL: Membuka " + upgraded + " (diupgrade ke HTTPS).";
         }
         if (isUriScheme(q)) {
             QDesktopServices::openUrl(QUrl(q));
@@ -1160,6 +1191,16 @@ static QString validateCommand(const QString& cmd) {
         if (binary == "top" && !subCmd.contains("-b"))
             return "Gunakan 'top -bn1' untuk output satu kali, bukan top interaktif.";
     }
+
+    // Blokir tambahan: cegah command yang mengandung pipe ke interpreter berbahaya
+    // dan operator redirect ke file arbitrary
+    static QRegularExpression dangerousPipe(R"(\|\s*(python|python3|bash|sh|zsh|perl|ruby|node|curl|wget|nc))");
+    static QRegularExpression dangerousRedirect(R"(\s*[>]{1,2}\s*[^/dev/null])");
+    if (dangerousPipe.match(trimmed).hasMatch())
+        return "Command mengandung pipe ke interpreter yang tidak diizinkan.";
+    // Blokir redirect ke file (kecuali /dev/null yang sudah di-strip)
+    if (trimmed.contains(">>") || (trimmed.contains(">") && !trimmed.contains("/dev/null")))
+        return "Redirect output ke file tidak diizinkan.";
 
     return {};
 }
@@ -2176,7 +2217,7 @@ void ShijimaManager::showEvent(QShowEvent *event) {
                 "Jangan dimulai dengan ':' atau kata-kata aneh.";
         }
 
-        m_aiRequestActive = true;
+        // m_aiRequestActive is set inside processUserCommand itself
         processUserCommand(greetPrompt);
     });
 }
@@ -2376,6 +2417,28 @@ ShijimaManager::ShijimaManager(QWidget *parent):
     // =============================================
 
     buildToolbar();
+
+    // ==================== AI CONFIRMATION CALLBACK ====================
+    // Dipanggil dari background thread saat AI ingin menjalankan aksi.
+    // BlockingQueuedConnection memastikan dialog tampil di main thread
+    // dan caller di background thread menunggu hingga user memilih.
+    g_confirmCallback = [this](const QString& title, const QString& details) -> bool {
+        bool result = false;
+        QMetaObject::invokeMethod(this, [this, &title, &details, &result]() {
+            QMessageBox msgBox(this);
+            msgBox.setWindowTitle(title);
+            msgBox.setText("<b>" + title + "</b>");
+            msgBox.setInformativeText(details);
+            msgBox.setIcon(QMessageBox::Question);
+            msgBox.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
+            msgBox.setDefaultButton(QMessageBox::No);
+            msgBox.setWindowFlags(msgBox.windowFlags() | Qt::WindowStaysOnTopHint);
+            result = (msgBox.exec() == QMessageBox::Yes);
+        }, Qt::BlockingQueuedConnection);
+        return result;
+    };
+    // ==================================================================
+
     m_httpApi.start("127.0.0.1", 32456);
 
     m_idleTicksRemaining = QRandomGenerator::global()->bounded(20, 50);
@@ -3062,11 +3125,28 @@ static bool isValidAction(const QString& act) {
 }
 
 void ShijimaManager::applyDecision(const QString& jsonDecision) {
-    QStringList lines = jsonDecision.split('\n', Qt::SkipEmptyParts);
-    QString jsonLine = lines.isEmpty() ? jsonDecision : lines[0].trimmed();
+    QString raw = jsonDecision.trimmed();
+
+    // Strip markdown code block wrappers (e.g. ```json ... ```)
+    if (raw.startsWith("```")) {
+        int firstNl = raw.indexOf('\n');
+        if (firstNl != -1) raw = raw.mid(firstNl + 1);
+        if (raw.endsWith("```")) raw.chop(3);
+        raw = raw.trimmed();
+    }
 
     QJsonParseError err;
-    QJsonDocument doc = QJsonDocument::fromJson(jsonLine.toUtf8(), &err);
+    QJsonDocument doc = QJsonDocument::fromJson(raw.toUtf8(), &err);
+
+    // Fallback: try extracting JSON substring {...} if surrounding text exists
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) {
+        int startObj = raw.indexOf('{');
+        int endObj = raw.lastIndexOf('}');
+        if (startObj != -1 && endObj > startObj) {
+            QString extracted = raw.mid(startObj, endObj - startObj + 1);
+            doc = QJsonDocument::fromJson(extracted.toUtf8(), &err);
+        }
+    }
 
     QString speech;
     QString expression = "normal";
@@ -3081,10 +3161,10 @@ void ShijimaManager::applyDecision(const QString& jsonDecision) {
         action = obj.value("action").toString();
         std::cout << "[AI] JSON parsed successfully" << std::endl;
     } else {
-        speech = jsonDecision;
+        speech = raw;
         expression = "normal";
         action = "idle";
-        std::cerr << "[AI] JSON parse failed, fallback to speech + idle" << std::endl;
+        std::cerr << "[AI] JSON parse failed, fallback to raw speech + idle" << std::endl;
     }
 
     if (!isValidExpression(expression)) {
@@ -3105,7 +3185,7 @@ void ShijimaManager::applyDecision(const QString& jsonDecision) {
             speakText(speech.trimmed());
             appendHistory("assistant", speech.trimmed(), false);
         } else {
-            appendHistory("assistant", jsonValid ? jsonLine.trimmed() : "...", false);
+            appendHistory("assistant", jsonValid ? raw.trimmed() : "...", false);
         }
 
         QString finalBehavior;
@@ -3157,6 +3237,19 @@ ShijimaManager::ToolResult ShijimaManager::executeBrowserTool(const QString& act
     result.success = false;
 
     QString actionLower = action.toLower();
+
+    // ── KONFIRMASI USER (HANYA UNTUK AKSI KRITIS SEPERTI KILL PROCESS) ──
+    if (actionLower == "kill") {
+        if (!confirmAIAction(
+                "AI ingin Menutup Aplikasi Browser",
+                "AI meminta izin untuk menutup proses browser: " + param + "\n\n"
+                "Izinkan?")) {
+            result.error = "[DITOLAK] User tidak mengizinkan penutupan aplikasi.";
+            return result;
+        }
+    }
+    // ─────────────────────────────────────────────────────────────
+
     if (actionLower == "open") {
         QDesktopServices::openUrl(QUrl(param));
         result.success = true;
@@ -3191,6 +3284,21 @@ ShijimaManager::ToolResult ShijimaManager::executeCmdTool(const QString& command
         return result;
     }
 
+    // ── KONFIRMASI USER (HANYA UNTUK PERINTAH KRITIS SEPERTI PKILL/KILLALL) ──
+    QString firstCmd = command.trimmed().split(' ').first().toLower();
+    if (firstCmd == "pkill" || firstCmd == "killall" || firstCmd == "chmod" || firstCmd == "chown") {
+        if (!confirmAIAction(
+                "AI ingin Menjalankan Perintah Kritis",
+                "AI meminta izin untuk menjalankan perintah berikut:\n\n"
+                "    " + command + "\n\n"
+                "Izinkan?")) {
+            result.error = "[DITOLAK] User tidak mengizinkan eksekusi command.";
+            return result;
+        }
+    }
+    // Perintah aman lainnya (ls, cat, grep, pwd, date, dll) langsung berjalan tanpa konfirmasi
+    // ─────────────────────────────────────────────────────────────
+
     QProcess proc;
     proc.setProcessChannelMode(QProcess::MergedChannels);
     proc.start("/bin/sh", QStringList() << "-c" << command);
@@ -3223,6 +3331,23 @@ ShijimaManager::ToolResult ShijimaManager::executeWriteFileTool(const QString& f
         return result;
     }
 
+    // ── KONFIRMASI USER (HANYA JIKA DI LUAR DIR SHIJIMAAI SEMENTARA) ──
+    QString destPath = filename.startsWith('/')
+        ? filename
+        : QDir::homePath() + "/ShijimaAI/" + filename;
+    if (filename.startsWith('/') && !filename.startsWith(QDir::homePath() + "/ShijimaAI")) {
+        if (!confirmAIAction(
+                "AI ingin Menulis File di Luar Sandbox",
+                "AI meminta izin untuk menulis file di lokasi berikut:\n\n"
+                "  Path: " + destPath + "\n\n"
+                "Izinkan?")) {
+            result.error = "[DITOLAK] User tidak mengizinkan penulisan file.";
+            return result;
+        }
+    }
+    // File di dalam ~/ShijimaAI/ ditulis secara otomatis tanpa mengganggu user
+    // ─────────────────────────────────────────────────────────────
+
     QString fullPath;
     if (filename.startsWith('/')) {
         if (!filename.startsWith(QDir::homePath())) {
@@ -3252,6 +3377,9 @@ ShijimaManager::ToolResult ShijimaManager::executeWriteFileTool(const QString& f
 ShijimaManager::ToolResult ShijimaManager::executeEditFileTool(const QString& filename, const QString& oldText, const QString& newText) {
     ToolResult result;
     result.success = false;
+
+    // Edit file di workspace ~/ShijimaAI berjalan otomatis tanpa dialog berlebihan
+    // ─────────────────────────────────────────────────────────────
 
     QString fullPath = QDir::homePath() + "/ShijimaAI/" + filename;
     QFile file(fullPath);
@@ -3287,6 +3415,9 @@ ShijimaManager::ToolResult ShijimaManager::executeRunPythonTool(const QString& s
     ToolResult result;
     result.success = false;
 
+    // Eksekusi script Python di sandbox ~/ShijimaAI berjalan otomatis tanpa mengganggu
+    // ─────────────────────────────────────────────────────────────
+
     QString fullPath = QDir::homePath() + "/ShijimaAI/" + scriptPath;
     QProcess proc;
     proc.setProcessChannelMode(QProcess::MergedChannels);
@@ -3312,6 +3443,19 @@ ShijimaManager::ToolResult ShijimaManager::executeRunPythonTool(const QString& s
 ShijimaManager::ToolResult ShijimaManager::executeRunShTool(const QString& scriptPath) {
     ToolResult result;
     result.success = false;
+
+    // ── KONFIRMASI USER ──────────────────────────────────────────
+    if (!confirmAIAction(
+            "AI ingin Menjalankan Shell Script",
+            "AI meminta izin untuk menjalankan shell script berikut:\n\n"
+            "  File: " + scriptPath + "\n"
+            "  Path: " + QDir::homePath() + "/ShijimaAI/" + scriptPath + "\n\n"
+            "⚠️  Shell script dapat menjalankan perintah apapun. Pastikan kamu tahu isi file ini!\n\n"
+            "Izinkan?")) {
+        result.error = "[DITOLAK] User tidak mengizinkan eksekusi shell script.";
+        return result;
+    }
+    // ─────────────────────────────────────────────────────────────
 
     QString fullPath = QDir::homePath() + "/ShijimaAI/" + scriptPath;
     QProcess proc;
@@ -4209,32 +4353,43 @@ void ShijimaManager::makeMascotSpeak(const QString& text) {
 
 // ==================== FILE SEARCH (non-AI) ====================
 static QString searchFiles(const QString& pattern, int maxResults) {
-    static QRegularExpression unsafeChars(R"([/\\'"`$;|&<>])");
-    if (unsafeChars.match(pattern).hasMatch())
-        return "Pola pencarian mengandung karakter yang tidak diizinkan.";
+    // Validasi pola: hanya allow alfanumerik, titik, underscore, dan dash
+    static QRegularExpression safePattern(R"(^[\w\.\-]+$)");
+    if (!safePattern.match(pattern).hasMatch())
+        return "Pola pencarian tidak valid. Gunakan hanya huruf, angka, titik, atau dash.";
+    if (pattern.contains("..") || pattern.length() > 64)
+        return "Pola pencarian tidak diizinkan.";
 
+    // Gunakan QDirIterator — tidak ada shell spawning, aman dari injection
     QString home = QDir::homePath();
-    QString command = QString(
-        "find \"%1\" -maxdepth 6 -type f -iname '*%2*' 2>/dev/null | head -n %3"
-    ).arg(home).arg(pattern).arg(maxResults);
+    QDirIterator it(home, {"*" + pattern + "*"},
+                    QDir::Files | QDir::NoDotAndDotDot,
+                    QDirIterator::Subdirectories);
 
-    QProcess process;
-    process.start("/bin/sh", QStringList() << "-c" << command);
-    if (!process.waitForFinished(5000)) {
-        process.kill();
-        return "Pencarian timeout. Coba pola yang lebih spesifik.";
+    QStringList results;
+    while (it.hasNext() && results.size() < maxResults) {
+        QString path = it.next();
+        // Batasi kedalaman direktori max 6
+        int pathDepth = path.mid(home.length()).count('/') - 1;
+        if (pathDepth > 6) continue;
+        results.append(path);
     }
 
-    QString output = process.readAllStandardOutput().trimmed();
-    return output.isEmpty()
+    return results.isEmpty()
         ? "Tidak ada file yang cocok dengan pola: " + pattern
-        : output;
+        : results.join("\n");
 }
 
 // ==================== PROCESS USER COMMAND ====================
 void ShijimaManager::processUserCommand(const QString& msg) {
     QString trimmed = msg.trimmed();
     if (trimmed.isEmpty()) return;
+
+    // Guard: cegah double-request (e.g. user spam send saat AI masih proses)
+    if (m_aiRequestActive && !trimmed.startsWith('/')) {
+        std::cout << "[Manager] AI request already active, ignoring new prompt." << std::endl;
+        return;
+    }
 
     if (trimmed == "/memory" || trimmed == "/ingatan") {
         QString info;
@@ -4444,12 +4599,26 @@ void ShijimaManager::processUserCommand(const QString& msg) {
         userMemoryUpdate(trimmed);
     }
 
-    if (!isInternalPrompt && !m_postureExprLocked && !m_mascots.empty()) {
-        int roll = QRandomGenerator::global()->bounded(100);
-        if (roll < THINKING_ANIMATION_CHANCE) {
-            m_mascots.front()->setExpression("mikir");
-            std::cout << "[AI] Thinking animation triggered (roll="
-                      << roll << " < " << THINKING_ANIMATION_CHANCE << ")" << std::endl;
+    if (!isInternalPrompt) {
+        if (m_mascots.empty()) {
+            auto &allTmpl = m_factory.get_all_templates();
+            if (!allTmpl.empty()) spawn(allTmpl.begin()->first);
+        }
+        if (!m_mascots.empty()) {
+            static const QStringList thinkingPhrases = {
+                "Thinking...",
+                "Bentar, mikir dulu...",
+                "Hmm, bentar ya...",
+                "Lagi dipikirin nih...",
+                "Proses dulu...",
+                "Sebentar..."
+            };
+            int idx = QRandomGenerator::global()->bounded((int)thinkingPhrases.size());
+            m_mascots.front()->speak(thinkingPhrases[idx], /*isThinking=*/true);
+
+            if (!m_postureExprLocked) {
+                m_mascots.front()->setExpression("mikir");
+            }
         }
     }
 
@@ -4515,7 +4684,8 @@ void ShijimaManager::triggerIdleAction() {
 
     m_idleBusy = true;
 
-    std::thread([this, prompt]() {
+    // Use QThreadPool (not detached std::thread) for proper lifecycle management
+    QThreadPool::globalInstance()->start([this, prompt]() {
         std::string reply = chatWithAI(prompt, 0, false, {}, {}, false);
         QString expr = m_lastAIExpr;
         QMetaObject::invokeMethod(this, [this, reply, expr]() {
@@ -4528,7 +4698,7 @@ void ShijimaManager::triggerIdleAction() {
             }
             m_idleBusy = false;
         }, Qt::QueuedConnection);
-    }).detach();
+    });
 }
 
 void ShijimaManager::applyAIAction(const std::string& actionName) {
@@ -4793,6 +4963,7 @@ void ShijimaManager::toggleRecording() {
             
             double rms = std::sqrt(sumSq / n);
             double zcr = static_cast<double>(zeroCrossings) / n;  // Zero Crossing Rate
+            (void)zcr;  // Dipersiapkan untuk ZCR-based VAD di masa depan
             
             // Noise gate threshold: abaikan jika RMS terlalu rendah (< 1%)
             bool hasVoice = rms > AUDIO_NOISE_GATE_THRESHOLD;
